@@ -14,6 +14,7 @@ import libmount
 import docker
 import os
 import dockworker
+import tinydb
 from tornado.httpclient import HTTPRequest, HTTPError, AsyncHTTPClient
 
 AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
@@ -25,6 +26,7 @@ DOCKER_URL = os.environ.get("DOCKER_URL", "unix://var/run/docker.sock")
 MOUNTS = {}
 
 PooledContainer = namedtuple('PooledContainer', ['id', 'path'])
+
 
 def sample_with_replacement(a, size):
     '''Get a random path. If Python had sampling with replacement built in,
@@ -40,9 +42,13 @@ def new_user(size):
 class MainHandler(tornado.web.RequestHandler):
 
     @property
+    def db(self):
+        return self.settings['mount_db']
+
+    @property
     def proxy_token(self):
         return self.settings['proxy_token']
-    
+
     @property
     def pool_name(self):
         return self.settings['pool_name']
@@ -50,15 +56,15 @@ class MainHandler(tornado.web.RequestHandler):
     @property
     def proxy_endpoint(self):
         return self.settings['proxy_endpoint']
-    
+
     @property
     def container_config(self):
         return self.settings['container_config']
-    
+
     @property
     def spawner(self):
         return self.settings['spawner']
-    
+
     @property
     def container_name_pattern(self):
         return self.settings['container_name_pattern']
@@ -75,7 +81,8 @@ class MainHandler(tornado.web.RequestHandler):
         gc.token = girder_token
         user = gc.get("/user/me")
         username = user["login"]
-        logging.info("Username %s", username)
+        db_entry = {'mounts': [], 'collection_id': collection_id,
+                    'username': username}
 
         vol_name = "%s_%s" % (collection_id, username)
         cli = docker.Client(base_url=DOCKER_URL)
@@ -95,8 +102,6 @@ class MainHandler(tornado.web.RequestHandler):
             if e.errno != 17:
                 raise
             pass
-
-        MOUNTS[volume["Name"]] = []
 
         params = {'parentType': 'folder', 'parentId': collection_id}
         folders = gc.listResource("/folder", params)
@@ -123,7 +128,7 @@ class MainHandler(tornado.web.RequestHandler):
                 cx.target = "{}".format(target)
                 cx.source = "{}".format(source)
                 cx.mount()
-                MOUNTS[volume["Name"]].append(target)
+                db_entry['mounts'].append(target)
                 logging.info("[*] %s binded to %s", source, target)
             else:
                 if sizeGB > 1:
@@ -138,7 +143,11 @@ class MainHandler(tornado.web.RequestHandler):
 
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
-        container = self._launch_container(volume)
+        container = yield self._launch_container(volume)
+        db_entry['container_id'] = container.id
+        db_entry['container_path'] = container.path
+        self.db.insert(db_entry)
+        self.write({'url': '/{}'.format(container.path)})
         self.finish()
 
     @gen.coroutine
@@ -146,7 +155,8 @@ class MainHandler(tornado.web.RequestHandler):
         user = new_user(12)
         path = "user/" + user
         container_name = 'tmp.{}.{}'.format(self.pool_name, user)
-        volume_bindings = {volume["Name"]: {'bind': "/home/jovyan/work", 'mode': 'rw'}}
+        volume_bindings = {volume["Name"]: {
+            'bind': "/home/jovyan/work", 'mode': 'rw'}}
         if not self.container_name_pattern.match(container_name):
             raise Exception("[{}] does not match [{}]!".format(container_name,
                                                                self.container_name_pattern.pattern))
@@ -159,10 +169,12 @@ class MainHandler(tornado.web.RequestHandler):
                                                                   volume_bindings=volume_bindings)
         container_id, host_ip, host_port = create_result
         logging.info(
-            "Created notebook server [%s] for path [%s] at [%s:%s]", container_name, path, host_ip, host_port)
+            "Created notebook server [%s] for path [%s] at [%s:%s]",
+            container_name, path, host_ip, host_port)
 
-        # Wait for the server to launch within the container before adding it to the pool or
-        # serving it to a user.
+        # Wait for the server to launch within the container before adding it
+        # to the pool or serving it to a user.
+
         yield self._wait_for_server(host_ip, host_port, path)
 
         http_client = AsyncHTTPClient()
@@ -175,9 +187,7 @@ class MainHandler(tornado.web.RequestHandler):
         })
 
         logging.debug("Proxying path [%s] to port [%s].", path, host_port)
-        req = HTTPRequest(proxy_endpoint,
-                          method="POST",
-                          headers=headers,
+        req = HTTPRequest(proxy_endpoint, method="POST", headers=headers,
                           body=body)
         try:
             yield http_client.fetch(req)
@@ -196,8 +206,9 @@ class MainHandler(tornado.web.RequestHandler):
         loop = tornado.ioloop.IOLoop.current()
         tic = loop.time()
 
-        # Docker starts listening on a socket before the container is fully launched. Wait for that,
-        # first.
+        # Docker starts listening on a socket before the container is fully
+        # launched. Wait for that, first.
+
         while loop.time() - tic < timeout:
             try:
                 socket.create_connection((ip, port))
@@ -224,13 +235,28 @@ class MainHandler(tornado.web.RequestHandler):
                 yield http_client.fetch(req)
             except HTTPError as http_error:
                 code = http_error.code
-                logging.info("Booting server at [%s], getting HTTP status [%s]", path, code)
+                logging.info(
+                    "Booting server at [%s], getting HTTP status [%s]", path, code)
                 yield gen.Task(loop.add_timeout, loop.time() + wait_time)
             else:
                 break
 
         logging.info("Server [%s] at address [%s:%s] has booted! Have at it.",
                      path, ip, port)
+
+    @gen.coroutine
+    def _proxy_remove(self, path):
+        '''Remove a path from the proxy.'''
+
+        url = "{}/api/routes/{}".format(self.proxy_endpoint, path.lstrip('/'))
+        headers = {"Authorization": "token {}".format(self.proxy_token)}
+        req = HTTPRequest(url, method="DELETE", headers=headers)
+        http_client = AsyncHTTPClient()
+
+        try:
+            yield http_client.fetch(req)
+        except HTTPError as e:
+            logging.error("Failed to delete route [%s]: %s", path, e)
 
     @gen.coroutine
     def delete(self):
@@ -246,11 +272,31 @@ class MainHandler(tornado.web.RequestHandler):
         username = user["login"]
         logging.info("Username %s", username)
 
-        # Kill container
+        query = tinydb.Query()
+        data = self.db.search((query.username == username) &
+                              (query.collection_id == collection_id))
 
+        print("data", data)
+        try:
+            db_entry = data[0]
+        except IndexError:
+            self.finish()
+
+        container = PooledContainer(id=db_entry["container_id"],
+                                    path=db_entry["container_path"])
+        try:
+            logging.info("Releasing container [%s].", container)
+            yield [
+                self.spawner.shutdown_notebook_server(container.id),
+                self._proxy_remove(container.path)
+            ]
+            logging.debug("Container [%s] has been released.", container)
+        except Exception as e:
+            logging.error("Unable to release container [%s]: %s", container, e)
+            self.finish()
 
         vol_name = "%s_%s" % (collection_id, username)
-        for mount_point in MOUNTS[vol_name]:
+        for mount_point in db_entry['mounts']:
             logging.info("Unmounting %s", mount_point)
             cx = libmount.Context()
             cx.target = mount_point
@@ -259,6 +305,9 @@ class MainHandler(tornado.web.RequestHandler):
         cli = docker.Client(base_url=DOCKER_URL)
         logging.info("Removing volume: %s", vol_name)
         cli.remove_volume(vol_name)
+
+        self.db.remove((query.username == username) &
+                       (query.collection_id == collection_id))
 
     def get(self):
         self.write("Hello, world\n")
@@ -270,6 +319,7 @@ if __name__ == "__main__":
     ]
 
     docker_host = os.environ.get('DOCKER_HOST', 'unix://var/run/docker.sock')
+    mount_db = tinydb.TinyDB(os.environ.get('MOUNT_DB', 'mounts.json'))
 
     command_default = (
         'jupyter notebook --no-browser'
@@ -302,10 +352,12 @@ if __name__ == "__main__":
         spawner=spawner,
         container_name_pattern=re.compile('tmp\.([^.]+)\.(.+)\Z'),
         pool_name="tmpnb",
+        mount_db=mount_db,
         container_config=container_config,
         proxy_token=os.environ.get('CONFIGPROXY_AUTH_TOKEN', "devtoken"),
-        proxy_endpoint=os.environ.get('CONFIGPROXY_ENDPOINT', "http://127.0.0.1:8001"),
+        proxy_endpoint=os.environ.get(
+            'CONFIGPROXY_ENDPOINT', "http://127.0.0.1:8001"),
     )
     app = tornado.web.Application(handlers, **settings)
-    app.listen(8080)
+    app.listen(9005)
     tornado.ioloop.IOLoop.current().start()
