@@ -80,6 +80,13 @@ class MainHandler(tornado.web.RequestHandler):
                      (girder_token, collection_id))
         gc.token = girder_token
         user = gc.get("/user/me")
+        if user is None:
+            logging.warn("Bad gider token")
+            raise tornado.web.HTTPError(
+                401, 'Failed to authenticate with girder'
+            )
+
+        logging.debug("USER = %s", json.dumps(user))
         username = user["login"]
         db_entry = {'mounts': [], 'collection_id': collection_id,
                     'username': username}
@@ -137,6 +144,7 @@ class MainHandler(tornado.web.RequestHandler):
                     continue
 
                 logging.info("[=] downloading recursively %s", collection_id)
+                # make it async again
                 gc.downloadFolderRecursive(folder["_id"],
                                            os.path.join(dest, folder["name"]))
                 logging.info("[=] finished downloading %s", collection_id)
@@ -276,7 +284,6 @@ class MainHandler(tornado.web.RequestHandler):
         data = self.db.search((query.username == username) &
                               (query.collection_id == collection_id))
 
-        print("data", data)
         try:
             db_entry = data[0]
         except IndexError:
