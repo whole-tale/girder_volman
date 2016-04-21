@@ -110,6 +110,8 @@ class MainHandler(tornado.web.RequestHandler):
                 raise
             pass
 
+        db_entry["mount_point"] = volume["Mountpoint"]
+
         params = {'parentType': 'folder', 'parentId': collection_id}
         folders = gc.listResource("/folder", params)
         for folder in folders:
@@ -273,12 +275,12 @@ class MainHandler(tornado.web.RequestHandler):
         collection_id = body['collection_id']
 
         gc = girder_client.GirderClient(apiUrl=GIRDER_API_URL)
-        logging.info("got token: %s, coll_id: %s" %
-                     (girder_token, collection_id))
+        logging.debug("got token: %s, coll_id: %s" %
+                      (girder_token, collection_id))
         gc.token = girder_token
         user = gc.get("/user/me")
         username = user["login"]
-        logging.info("Username %s", username)
+        logging.debug("Username %s", username)
 
         query = tinydb.Query()
         data = self.db.search((query.username == username) &
@@ -308,6 +310,14 @@ class MainHandler(tornado.web.RequestHandler):
             cx = libmount.Context()
             cx.target = mount_point
             cx.umount()
+
+        # upload notebooks
+        user_id = gc.get("/user/me")["_id"]
+        params = {'parentType': 'user', 'parentId': user_id,
+                  'name': 'Private'}
+        homeDir = gc.listResource("/folder", params)[0]["_id"]
+        gc.blacklist.append("data")
+        gc.upload('{}/*.ipynb'.db_entry["mount_point"], homeDir, reuse_existing=True)
 
         cli = docker.Client(base_url=DOCKER_URL)
         logging.info("Removing volume: %s", vol_name)
