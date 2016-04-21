@@ -1,0 +1,5 @@
+tinydb
+docker-py
+girder-client
+tornado>=4.1
+requests
