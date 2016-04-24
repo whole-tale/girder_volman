@@ -39,6 +39,15 @@ def new_user(size):
     return sample_with_replacement(string.ascii_letters + string.digits, size)
 
 
+def _safe_mkdir(dest):
+    try:
+        os.mkdir(dest)
+    except OSError as e:
+        if e.errno != 17:
+            raise
+        pass
+
+
 @gen.coroutine
 def download_items(gc, folder_id, dest):
     '''Download all items from a girder folder
@@ -58,6 +67,26 @@ def download_items(gc, folder_id, dest):
         logging.info("[=] downloading %s", item["name"])
         gc.downloadItem(item["_id"], dest)
         logging.info("[=] finished downloading %s", item["name"])
+
+
+@gen.coroutine
+def parse_request_body(body):
+    girder_token = body['girder_token']
+    folder_id = body['collection_id']
+
+    gc = girder_client.GirderClient(apiUrl=GIRDER_API_URL)
+    logging.debug("got token: %s, folder_id: %s" %
+                  (girder_token, folder_id))
+    gc.token = girder_token
+    user = gc.get("/user/me")
+    if user is None:
+        logging.warn("Bad gider token")
+        raise tornado.web.HTTPError(
+            401, 'Failed to authenticate with girder'
+        )
+
+    logging.debug("USER = %s", json.dumps(user))
+    return gc, folder_id, user
 
 
 class MainHandler(tornado.web.RequestHandler):
@@ -93,26 +122,12 @@ class MainHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self):
         body = json.loads(self.request.body.decode("utf-8"))
-        girder_token = body['girder_token']
-        folder_id = body['collection_id']
+        gc, folder_id, user = yield parse_request_body(body)
 
-        gc = girder_client.GirderClient(apiUrl=GIRDER_API_URL)
-        logging.info("got token: %s, folder_id: %s" %
-                     (girder_token, folder_id))
-        gc.token = girder_token
-        user = gc.get("/user/me")
-        if user is None:
-            logging.warn("Bad gider token")
-            raise tornado.web.HTTPError(
-                401, 'Failed to authenticate with girder'
-            )
-
-        logging.debug("USER = %s", json.dumps(user))
-        username = user["login"]
         db_entry = {'mounts': [], 'folder_id': folder_id,
-                    'username': username}
+                    'username': user["login"]}
 
-        vol_name = "%s_%s" % (folder_id, username)
+        vol_name = "%s_%s" % (folder_id, user["login"])
         cli = docker.Client(base_url=DOCKER_URL)
         volume = cli.create_volume(name=vol_name, driver='local')
         logging.info("Volume: %s created", vol_name)
@@ -128,12 +143,7 @@ class MainHandler(tornado.web.RequestHandler):
             os.chown(os.path.join(volume["Mountpoint"], item), 1000, 100)
 
         dest = os.path.join(volume["Mountpoint"], "data")
-        try:
-            os.mkdir(dest)
-        except OSError as e:
-            if e.errno != 17:
-                raise
-            pass
+        _safe_mkdir(dest)
 
         db_entry["mount_point"] = volume["Mountpoint"]
 
@@ -152,12 +162,7 @@ class MainHandler(tornado.web.RequestHandler):
             if source is not None:
                 logging.info("[*] Using mount bind for %s", source)
                 target = os.path.join(dest, os.path.basename(source))
-                try:
-                    os.mkdir(target)
-                except OSError as e:
-                    if e.errno != 17:
-                        raise
-                    pass
+                _safe_mkdir(target)
 
                 cx = libmount.Context()
                 cx.fstype = "bind"
@@ -314,19 +319,10 @@ class MainHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def delete(self):
         body = json.loads(self.request.body.decode("utf-8"))
-        girder_token = body['girder_token']
-        folder_id = body['collection_id']
-
-        gc = girder_client.GirderClient(apiUrl=GIRDER_API_URL)
-        logging.debug("got token: %s, folder_id: %s" %
-                      (girder_token, folder_id))
-        gc.token = girder_token
-        user = gc.get("/user/me")
-        username = user["login"]
-        logging.debug("Username %s", username)
+        gc, folder_id, user = yield parse_request_body(body)
 
         query = tinydb.Query()
-        data = self.db.search((query.username == username) &
+        data = self.db.search((query.username == user["login"]) &
                               (query.folder_id == folder_id))
 
         try:
@@ -347,7 +343,7 @@ class MainHandler(tornado.web.RequestHandler):
             logging.error("Unable to release container [%s]: %s", container, e)
             self.finish()
 
-        vol_name = "%s_%s" % (folder_id, username)
+        vol_name = "%s_%s" % (folder_id, user["login"])
         for mount_point in db_entry['mounts']:
             logging.info("Unmounting %s", mount_point)
             cx = libmount.Context()
@@ -367,7 +363,7 @@ class MainHandler(tornado.web.RequestHandler):
         logging.info("Removing volume: %s", vol_name)
         cli.remove_volume(vol_name)
 
-        self.db.remove((query.username == username) &
+        self.db.remove((query.username == user["login"]) &
                        (query.folder_id == folder_id))
 
     def get(self):
