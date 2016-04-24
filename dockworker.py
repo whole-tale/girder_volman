@@ -5,7 +5,7 @@ import re
 import docker
 import requests
 
-from docker.utils import create_host_config, kwargs_from_env
+from docker.utils import kwargs_from_env
 
 from tornado import gen, web
 from tornado.log import app_log
@@ -146,7 +146,7 @@ class DockerSpawner():
             extra_hosts=extra_hosts
         )
 
-        host_config = create_host_config(**host_config)
+        host_config = yield self.docker_client.create_host_config(**host_config)
         
         cpu_shares = None
 
