@@ -39,6 +39,27 @@ def new_user(size):
     return sample_with_replacement(string.ascii_letters + string.digits, size)
 
 
+@gen.coroutine
+def download_items(gc, folder_id, dest):
+    '''Download all items from a girder folder
+
+    Parameters
+    ----------
+
+    gc : GirderClient
+        Initiliazed instance of GirderClient
+    folder_id : str
+        Girder's folder id
+    dest : str
+        Destination path
+    '''
+    items = gc.listResource('/item', {'folderId': folder_id, 'limit': 200})
+    for item in items:
+        logging.info("[=] downloading %s", item["name"])
+        gc.downloadItem(item["_id"], dest)
+        logging.info("[=] finished downloading %s", item["name"])
+
+
 class MainHandler(tornado.web.RequestHandler):
 
     @property
@@ -73,11 +94,11 @@ class MainHandler(tornado.web.RequestHandler):
     def post(self):
         body = json.loads(self.request.body.decode("utf-8"))
         girder_token = body['girder_token']
-        collection_id = body['collection_id']
+        folder_id = body['collection_id']
 
         gc = girder_client.GirderClient(apiUrl=GIRDER_API_URL)
-        logging.info("got token: %s, coll_id: %s" %
-                     (girder_token, collection_id))
+        logging.info("got token: %s, folder_id: %s" %
+                     (girder_token, folder_id))
         gc.token = girder_token
         user = gc.get("/user/me")
         if user is None:
@@ -88,10 +109,10 @@ class MainHandler(tornado.web.RequestHandler):
 
         logging.debug("USER = %s", json.dumps(user))
         username = user["login"]
-        db_entry = {'mounts': [], 'collection_id': collection_id,
+        db_entry = {'mounts': [], 'folder_id': folder_id,
                     'username': username}
 
-        vol_name = "%s_%s" % (collection_id, username)
+        vol_name = "%s_%s" % (folder_id, username)
         cli = docker.Client(base_url=DOCKER_URL)
         volume = cli.create_volume(name=vol_name, driver='local')
         logging.info("Volume: %s created", vol_name)
@@ -101,6 +122,10 @@ class MainHandler(tornado.web.RequestHandler):
                   'name': 'Private'}
         homeDir = gc.listResource("/folder", params)[0]["_id"]
         gc.downloadFolderRecursive(homeDir, volume["Mountpoint"])
+
+        # TODO: read uid/gid from env/config
+        for item in os.listdir(volume["Mountpoint"]):
+            os.chown(os.path.join(volume["Mountpoint"], item), 1000, 100)
 
         dest = os.path.join(volume["Mountpoint"], "data")
         try:
@@ -112,13 +137,17 @@ class MainHandler(tornado.web.RequestHandler):
 
         db_entry["mount_point"] = volume["Mountpoint"]
 
-        params = {'parentType': 'folder', 'parentId': collection_id}
+        params = {'parentType': 'folder', 'parentId': folder_id,
+                  'limit': 200}
         folders = gc.listResource("/folder", params)
         for folder in folders:
             sizeGB = folder.get("size", 0) // 1024**3
             metadata = folder.get("meta", None)
+            logging.info("Metadata for folder", metadata)
             if metadata is not None:
                 source = metadata.get("phys_path", None)
+            else:
+                source = None
 
             if source is not None:
                 logging.info("[*] Using mount bind for %s", source)
@@ -140,16 +169,27 @@ class MainHandler(tornado.web.RequestHandler):
                 db_entry['mounts'].append(target)
                 logging.info("[*] %s binded to %s", source, target)
             else:
+                # TODO
+                # this doesn't work, as girder doesn't report size properly
                 if sizeGB > 1:
                     logging.info("[*] folder is too big to download: %i GB",
                                  sizeGB)
                     continue
 
-                logging.info("[=] downloading recursively %s", collection_id)
-                # make it async again
-                gc.downloadFolderRecursive(folder["_id"],
-                                           os.path.join(dest, folder["name"]))
-                logging.info("[=] finished downloading %s", collection_id)
+                logging.info("[=] downloading recursively %s", folder_id)
+                # start girder download, since it may take some time we are
+                # using background task to download data from girder, there's
+                # high chance it'll be finished before user actually needs
+                # anything
+                tornado.ioloop.IOLoop.current().spawn_callback(
+                    gc.downloadFolderRecursive, folder["_id"],
+                    os.path.join(dest, folder["name"])
+                )
+                logging.info("[=] finished downloading %s", folder_id)
+
+        # asynchronously download all items
+        tornado.ioloop.IOLoop.current().spawn_callback(download_items,
+                                                       gc, folder_id, dest)
 
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
@@ -168,15 +208,17 @@ class MainHandler(tornado.web.RequestHandler):
         volume_bindings = {volume["Name"]: {
             'bind': "/home/jovyan/work", 'mode': 'rw'}}
         if not self.container_name_pattern.match(container_name):
+            pattern = self.container_name_pattern.pattern
             raise Exception("[{}] does not match [{}]!".format(container_name,
-                                                               self.container_name_pattern.pattern))
+                                                               pattern))
 
         logging.info("Launching new notebook server [%s] at path [%s].",
                      container_name, path)
-        create_result = yield self.spawner.create_notebook_server(base_path=path,
-                                                                  container_name=container_name,
-                                                                  container_config=self.container_config,
-                                                                  volume_bindings=volume_bindings)
+        create_result = yield self.spawner.create_notebook_server(
+            base_path=path, container_name=container_name,
+            container_config=self.container_config,
+            volume_bindings=volume_bindings
+        )
         container_id, host_ip, host_port = create_result
         logging.info(
             "Created notebook server [%s] for path [%s] at [%s:%s]",
@@ -246,7 +288,8 @@ class MainHandler(tornado.web.RequestHandler):
             except HTTPError as http_error:
                 code = http_error.code
                 logging.info(
-                    "Booting server at [%s], getting HTTP status [%s]", path, code)
+                    "Booting server at [%s], getting HTTP status [%s]",
+                    path, code)
                 yield gen.Task(loop.add_timeout, loop.time() + wait_time)
             else:
                 break
@@ -272,11 +315,11 @@ class MainHandler(tornado.web.RequestHandler):
     def delete(self):
         body = json.loads(self.request.body.decode("utf-8"))
         girder_token = body['girder_token']
-        collection_id = body['collection_id']
+        folder_id = body['collection_id']
 
         gc = girder_client.GirderClient(apiUrl=GIRDER_API_URL)
-        logging.debug("got token: %s, coll_id: %s" %
-                      (girder_token, collection_id))
+        logging.debug("got token: %s, folder_id: %s" %
+                      (girder_token, folder_id))
         gc.token = girder_token
         user = gc.get("/user/me")
         username = user["login"]
@@ -284,7 +327,7 @@ class MainHandler(tornado.web.RequestHandler):
 
         query = tinydb.Query()
         data = self.db.search((query.username == username) &
-                              (query.collection_id == collection_id))
+                              (query.folder_id == folder_id))
 
         try:
             db_entry = data[0]
@@ -304,7 +347,7 @@ class MainHandler(tornado.web.RequestHandler):
             logging.error("Unable to release container [%s]: %s", container, e)
             self.finish()
 
-        vol_name = "%s_%s" % (collection_id, username)
+        vol_name = "%s_%s" % (folder_id, username)
         for mount_point in db_entry['mounts']:
             logging.info("Unmounting %s", mount_point)
             cx = libmount.Context()
@@ -317,14 +360,15 @@ class MainHandler(tornado.web.RequestHandler):
                   'name': 'Private'}
         homeDir = gc.listResource("/folder", params)[0]["_id"]
         gc.blacklist.append("data")
-        gc.upload('{}/*.ipynb'.db_entry["mount_point"], homeDir, reuse_existing=True)
+        gc.upload('{}/*.ipynb'.format(db_entry["mount_point"]),
+                  homeDir, reuse_existing=True)
 
         cli = docker.Client(base_url=DOCKER_URL)
         logging.info("Removing volume: %s", vol_name)
         cli.remove_volume(vol_name)
 
         self.db.remove((query.username == username) &
-                       (query.collection_id == collection_id))
+                       (query.folder_id == folder_id))
 
     def get(self):
         self.write("Hello, world\n")
@@ -345,12 +389,13 @@ if __name__ == "__main__":
         ' --NotebookApp.port_retries=0'
     )
 
+    # TODO: read from env / config file
     container_config = dockworker.ContainerConfig(
-        image="jupyter/minimal-notebook",
         command=command_default,
-        mem_limit="512m",
+        image="tmpnb-notebook",
+        mem_limit="1024m",
         cpu_shares=None,
-        container_ip='127.0.0.1',
+        container_ip='172.17.0.1',
         container_port='8888',
         container_user='jovyan',
         host_network=False,
