@@ -64,9 +64,16 @@ def download_items(gc, folder_id, dest):
     '''
     items = gc.listResource('/item', {'folderId': folder_id, 'limit': 200})
     for item in items:
-        logging.info("[=] downloading %s", item["name"])
-        gc.downloadItem(item["_id"], dest)
-        logging.info("[=] finished downloading %s", item["name"])
+        sizeMB = item.get("size", 0) // 1024**2
+        if sizeMB > 100:
+            msg = (
+                "[=] Item '{}' size '{}' > 100MB. Aborting!"
+            ).format(item["name"], sizeMB)
+            logging.info(msg)
+        else:
+            logging.info("[=] downloading %s", item["name"])
+            gc.downloadItem(item["_id"], dest)
+            logging.info("[=] finished downloading %s", item["name"])
 
 
 @gen.coroutine
