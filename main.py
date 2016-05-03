@@ -92,6 +92,12 @@ def parse_request_body(body):
             401, 'Failed to authenticate with girder'
         )
 
+    # Allow sysop to delete any notebook
+    userId = body.get('userId', user['_id'])
+    if userId != user['_id'] and user["admin"]:
+        user = gc.get("/user/{id}".format(id=userId))
+        logging.info("Overriding user %s", user["login"])
+
     logging.debug("USER = %s", json.dumps(user))
     return gc, folder_id, user
 
@@ -355,7 +361,10 @@ class MainHandler(tornado.web.RequestHandler):
             logging.info("Unmounting %s", mount_point)
             cx = libmount.Context()
             cx.target = mount_point
-            cx.umount()
+            try:
+                cx.umount()
+            except TypeError:
+                pass  # umount failed, keep going
 
         # upload notebooks
         user_id = gc.get("/user/me")["_id"]
