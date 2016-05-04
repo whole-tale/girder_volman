@@ -114,9 +114,9 @@ def bind_items(gc, folder_id, dest):
     if folder_path is not None:
         # check if all items share path
         items_path = _long_substr([_get_phys_path(item) for item in items])
-        if items_path is not None and items_path == folder_path:
+        if items_path is not None and items_path.rstrip('/') == folder_path:
             # yay mount folder and be done with it
-            return list(_bind_mount(folder_path, dest))
+            return [_bind_mount(folder_path, dest)], []
 
     mounted_items = []
     items_to_download = []
@@ -233,8 +233,8 @@ class MainHandler(tornado.web.RequestHandler):
         for folder in folders:
             sizeGB = folder.get("size", 0) // 1024**3
             metadata = folder.get("meta", None)
-            logging.info("Metadata for folder", metadata)
             if metadata is not None:
+                logging.info("Metadata for folder", metadata)
                 source = metadata.get("phys_path", None)
             else:
                 source = None
@@ -260,7 +260,7 @@ class MainHandler(tornado.web.RequestHandler):
                 )
                 logging.info("[=] finished downloading %s", folder_id)
 
-        mounted_items, items_to_download = bind_items(gc, folder_id, dest)
+        mounted_items, items_to_download = yield bind_items(gc, folder_id, dest)
         db_entry['mounts'] += mounted_items
 
         # asynchronously download remaining items
@@ -423,6 +423,7 @@ class MainHandler(tornado.web.RequestHandler):
             try:
                 cx.umount()
             except TypeError:
+                logging.warn("[***] umount %s failed", mount_point)
                 pass  # umount failed, keep going
 
         # upload notebooks
