@@ -48,8 +48,52 @@ def _safe_mkdir(dest):
         pass
 
 
+def _get_phys_path(model):
+    try:
+        phys_path = model['meta']['phys_path']
+    except KeyError:
+        return None
+    return phys_path
+
+# http://stackoverflow.com/questions/2892931/
+
+
+def _long_substr(data):
+    try:
+        substr = ''
+        if len(data) > 1 and len(data[0]) > 0:
+            for i in range(len(data[0])):
+                for j in range(len(data[0]) - i + 1):
+                    all_check = all(data[0][i:i + j] in x for x in data)
+                    if j > len(substr) and all_check:
+                        substr = data[0][i:i + j]
+        return substr
+    except TypeError:
+        return None
+
+
+def _bind_mount(source, dest):
+    logging.info("[*] Using mount bind for %s", source)
+    target = os.path.join(dest, os.path.basename(source))
+
+    if os.path.isdir(source):
+        _safe_mkdir(target)
+    elif os.path.isfile(source):
+        open(target, 'w').close()
+
+    cx = libmount.Context()
+    cx.fstype = "bind"
+    cx.options = "bind"
+    logging.info("[*] Source: %s target: %s", source, target)
+    cx.target = "{}".format(target)
+    cx.source = "{}".format(source)
+    cx.mount()
+    logging.info("[*] %s binded to %s", source, target)
+    return target
+
+
 @gen.coroutine
-def download_items(gc, folder_id, dest):
+def bind_items(gc, folder_id, dest):
     '''Download all items from a girder folder
 
     Parameters
@@ -62,18 +106,41 @@ def download_items(gc, folder_id, dest):
     dest : str
         Destination path
     '''
+    folder = gc.getFolder(folder_id)
+    folder_path = _get_phys_path(folder)
+
     items = gc.listResource('/item', {'folderId': folder_id, 'limit': 200})
+
+    if folder_path is not None:
+        # check if all items share path
+        items_path = _long_substr([_get_phys_path(item) for item in items])
+        if items_path is not None and items_path == folder_path:
+            # yay mount folder and be done with it
+            return list(_bind_mount(folder_path, dest))
+
+    mounted_items = []
+    items_to_download = []
     for item in items:
         sizeMB = item.get("size", 0) // 1024**2
         if sizeMB > 100:
-            msg = (
-                "[=] Item '{}' size '{}' > 100MB. Aborting!"
-            ).format(item["name"], sizeMB)
-            logging.info(msg)
+            item_path = _get_phys_path(item)
+            if item_path is None:
+                msg = (
+                    "[=] Item '{}' size '{}' > 100MB. Aborting!"
+                ).format(item["name"], sizeMB)
+                logging.info(msg)
+            else:
+                mounted_items.append(_bind_mount(item_path, dest))
         else:
-            logging.info("[=] downloading %s", item["name"])
-            gc.downloadItem(item["_id"], dest)
-            logging.info("[=] finished downloading %s", item["name"])
+            items_to_download.append(item)
+    return mounted_items, items_to_download
+
+
+def download_items(gc, items, dest):
+    for item in items:
+        logging.info("[=] downloading %s", item["name"])
+        gc.downloadItem(item["_id"], dest)
+        logging.info("[=] finished downloading %s", item["name"])
 
 
 @gen.coroutine
@@ -173,19 +240,7 @@ class MainHandler(tornado.web.RequestHandler):
                 source = None
 
             if source is not None:
-                logging.info("[*] Using mount bind for %s", source)
-                target = os.path.join(dest, os.path.basename(source))
-                _safe_mkdir(target)
-
-                cx = libmount.Context()
-                cx.fstype = "bind"
-                cx.options = "bind"
-                logging.info("[*] Source: %s target: %s", source, target)
-                cx.target = "{}".format(target)
-                cx.source = "{}".format(source)
-                cx.mount()
-                db_entry['mounts'].append(target)
-                logging.info("[*] %s binded to %s", source, target)
+                db_entry['mounts'].append(_bind_mount(source, dest))
             else:
                 # TODO
                 # this doesn't work, as girder doesn't report size properly
@@ -205,9 +260,13 @@ class MainHandler(tornado.web.RequestHandler):
                 )
                 logging.info("[=] finished downloading %s", folder_id)
 
-        # asynchronously download all items
+        mounted_items, items_to_download = bind_items(gc, folder_id, dest)
+        db_entry['mounts'] += mounted_items
+
+        # asynchronously download remaining items
         tornado.ioloop.IOLoop.current().spawn_callback(download_items,
-                                                       gc, folder_id, dest)
+                                                       gc, items_to_download,
+                                                       dest)
 
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
