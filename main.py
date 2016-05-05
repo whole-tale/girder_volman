@@ -400,7 +400,8 @@ class MainHandler(tornado.web.RequestHandler):
         try:
             db_entry = data[0]
         except IndexError:
-            self.finish()
+            raise tornado.web.HTTPError(
+                410, 'Container does not exist in the database')
 
         container = PooledContainer(id=db_entry["container_id"],
                                     path=db_entry["container_path"])
@@ -413,7 +414,8 @@ class MainHandler(tornado.web.RequestHandler):
             logging.debug("Container [%s] has been released.", container)
         except Exception as e:
             logging.error("Unable to release container [%s]: %s", container, e)
-            self.finish()
+            raise tornado.web.HTTPError(
+                500, "Unable to remove container, contact admin")
 
         vol_name = "%s_%s" % (folder_id, user["login"])
         for mount_point in db_entry['mounts']:
@@ -432,12 +434,20 @@ class MainHandler(tornado.web.RequestHandler):
                   'name': 'Private'}
         homeDir = gc.listResource("/folder", params)[0]["_id"]
         gc.blacklist.append("data")
-        gc.upload('{}/*.ipynb'.format(db_entry["mount_point"]),
-                  homeDir, reuse_existing=True)
+        try:
+            gc.upload('{}/*.ipynb'.format(db_entry["mount_point"]),
+                      homeDir, reuse_existing=True)
+        except girder_client.HttpError:
+            logging.warn("Something went wrong with data upload, should backup data")
+            pass  # upload failed, keep going
 
         cli = docker.Client(base_url=DOCKER_URL)
-        logging.info("Removing volume: %s", vol_name)
-        cli.remove_volume(vol_name)
+        try:
+            logging.info("Removing volume: %s", vol_name)
+            cli.remove_volume(vol_name)
+        except Exception as e:
+            logging.error("Unable to remove volume [%s]: %s", vol_name, e)
+            pass
 
         self.db.remove((query.username == user["login"]) &
                        (query.folder_id == folder_id))
