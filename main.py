@@ -216,7 +216,13 @@ class MainHandler(tornado.web.RequestHandler):
         params = {'parentType': 'user', 'parentId': user["_id"],
                   'name': 'Private'}
         homeDir = gc.listResource("/folder", params)[0]["_id"]
-        gc.downloadFolderRecursive(homeDir, volume["Mountpoint"])
+
+        items = [item["_id"] for item in gc.listItem(homeDir)
+                 if item["name"].endswith("pynb")]
+        # TODO: should be done in one go with /resource endpoint
+        #  but client doesn't have it yet
+        for item in items:
+            gc.downloadItem(item, volume["Mountpoint"])
 
         # TODO: read uid/gid from env/config
         for item in os.listdir(volume["Mountpoint"]):
