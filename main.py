@@ -1,27 +1,30 @@
-import re
-import random
-import socket
+from collections import namedtuple
 import errno
-import string
+import json
 import logging
+import os
+import random
+import re
+import socket
+import string
+import subprocess
+
+import docker
+import girder_client
+import tinydb
 import tornado.ioloop
 import tornado.web
 from tornado import gen
-from collections import namedtuple
-import json
-import girder_client
-import libmount
-import docker
-import os
-import dockworker
-import tinydb
 from tornado.httpclient import HTTPRequest, HTTPError, AsyncHTTPClient
+
+import dockworker
 
 AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
 
 GIRDER_API_URL = os.environ.get(
     "GIRDER_API_URL", "https://girder.hub.yt/api/v1")
 DOCKER_URL = os.environ.get("DOCKER_URL", "unix://var/run/docker.sock")
+HOSTDIR = os.environ.get("HOSTDIR", "/host")
 
 MOUNTS = {}
 
@@ -45,6 +48,7 @@ def _safe_mkdir(dest):
     except OSError as e:
         if e.errno != 17:
             raise
+        logging.warn("Failed to mkdir {}".format(dest))
         pass
 
 
@@ -76,18 +80,15 @@ def _bind_mount(source, dest):
     logging.info("[*] Using mount bind for %s", source)
     target = os.path.join(dest, os.path.basename(source))
 
-    if os.path.isdir(source):
-        _safe_mkdir(target)
-    elif os.path.isfile(source):
-        open(target, 'w').close()
+    if os.path.isdir(HOSTDIR + source):
+        _safe_mkdir(HOSTDIR + target)
+    elif os.path.isfile(HOSTDIR + source):
+        open(HOSTDIR + target, 'w').close()
+    else:
+        logging.warn("[*] Source %s is neither a file nor directory", source)
 
-    cx = libmount.Context()
-    cx.fstype = "bind"
-    cx.options = "bind"
     logging.info("[*] Source: %s target: %s", source, target)
-    cx.target = "{}".format(target)
-    cx.source = "{}".format(source)
-    cx.mount()
+    subprocess.call(["mount", "--bind", source, target])
     logging.info("[*] %s binded to %s", source, target)
     return target
 
@@ -139,7 +140,7 @@ def bind_items(gc, folder_id, dest):
 def download_items(gc, items, dest):
     for item in items:
         logging.info("[=] downloading %s", item["name"])
-        gc.downloadItem(item["_id"], dest)
+        gc.downloadItem(item["_id"], HOSTDIR + dest)
         logging.info("[=] finished downloading %s", item["name"])
 
 
@@ -222,14 +223,15 @@ class MainHandler(tornado.web.RequestHandler):
         # TODO: should be done in one go with /resource endpoint
         #  but client doesn't have it yet
         for item in items:
-            gc.downloadItem(item, volume["Mountpoint"])
+            gc.downloadItem(item, HOSTDIR + volume["Mountpoint"])
 
         # TODO: read uid/gid from env/config
-        for item in os.listdir(volume["Mountpoint"]):
-            os.chown(os.path.join(volume["Mountpoint"], item), 1000, 100)
+        for item in os.listdir(HOSTDIR + volume["Mountpoint"]):
+            os.chown(os.path.join(HOSTDIR + volume["Mountpoint"], item),
+                     1000, 100)
 
         dest = os.path.join(volume["Mountpoint"], "data")
-        _safe_mkdir(dest)
+        _safe_mkdir(HOSTDIR + dest)
 
         db_entry["mount_point"] = volume["Mountpoint"]
 
@@ -262,17 +264,18 @@ class MainHandler(tornado.web.RequestHandler):
                 # anything
                 tornado.ioloop.IOLoop.current().spawn_callback(
                     gc.downloadFolderRecursive, folder["_id"],
-                    os.path.join(dest, folder["name"])
+                    os.path.join(HOSTDIR + dest, folder["name"])
                 )
                 logging.info("[=] finished downloading %s", folder_id)
 
-        mounted_items, items_to_download = yield bind_items(gc, folder_id, dest)
+        mounted_items, items_to_download = \
+            yield bind_items(gc, folder_id, dest)
         db_entry['mounts'] += mounted_items
 
         # asynchronously download remaining items
         tornado.ioloop.IOLoop.current().spawn_callback(download_items,
                                                        gc, items_to_download,
-                                                       dest)
+                                                       HOSTDIR + dest)
 
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
@@ -426,13 +429,7 @@ class MainHandler(tornado.web.RequestHandler):
         vol_name = "%s_%s" % (folder_id, user["login"])
         for mount_point in db_entry['mounts']:
             logging.info("Unmounting %s", mount_point)
-            cx = libmount.Context()
-            cx.target = mount_point
-            try:
-                cx.umount()
-            except TypeError:
-                logging.warn("[***] umount %s failed", mount_point)
-                pass  # umount failed, keep going
+            subprocess.call(["umount", mount_point])
 
         # upload notebooks
         user_id = gc.get("/user/me")["_id"]
@@ -441,10 +438,11 @@ class MainHandler(tornado.web.RequestHandler):
         homeDir = gc.listResource("/folder", params)[0]["_id"]
         gc.blacklist.append("data")
         try:
-            gc.upload('{}/*.ipynb'.format(db_entry["mount_point"]),
+            gc.upload('{}/*.ipynb'.format(HOSTDIR + db_entry["mount_point"]),
                       homeDir, reuse_existing=True)
         except girder_client.HttpError:
-            logging.warn("Something went wrong with data upload, should backup data")
+            logging.warn("Something went wrong with data upload"
+                         ", should backup data")
             pass  # upload failed, keep going
 
         cli = docker.Client(base_url=DOCKER_URL)

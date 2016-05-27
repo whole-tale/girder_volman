@@ -1,17 +1,16 @@
 from concurrent.futures import ThreadPoolExecutor
 from collections import namedtuple
-import re
 
 import docker
 import requests
 
 from docker.utils import kwargs_from_env
 
-from tornado import gen, web
+from tornado import gen
 from tornado.log import app_log
 
 ContainerConfig = namedtuple('ContainerConfig', [
-    'image', 'command', 'mem_limit', 'cpu_shares', 'container_ip', 
+    'image', 'command', 'mem_limit', 'cpu_shares', 'container_ip',
     'container_port', 'container_user', 'host_network', 'host_directories',
     'extra_hosts'
 ])
@@ -25,6 +24,7 @@ class AsyncDockerClient():
     on every single docker method called on it, configured with an executor.
     If no executor is passed, it defaults ThreadPoolExecutor(max_workers=2).
     '''
+
     def __init__(self, docker_client, executor=None):
         if executor is None:
             executor = ThreadPoolExecutor(max_workers=2)
@@ -48,6 +48,7 @@ class AsyncDockerClient():
 
 
 class DockerSpawner():
+
     def __init__(self,
                  docker_host='unix://var/run/docker.sock',
                  version='auto',
@@ -55,7 +56,6 @@ class DockerSpawner():
                  max_workers=64,
                  assert_hostname=False):
 
-        #kwargs = kwargs_from_env(assert_hostname=False)
         kwargs = kwargs_from_env(assert_hostname=assert_hostname)
 
         # environment variable DOCKER_HOST takes precedence
@@ -74,8 +74,8 @@ class DockerSpawner():
         self.port = 0
 
     @gen.coroutine
-    def create_notebook_server(self, base_path, container_name, container_config,
-                               volume_bindings):
+    def create_notebook_server(self, base_path, container_name,
+                               container_config, volume_bindings):
         '''Creates a notebook_server running off of `base_path`.
 
         Returns the (container_id, ip, port) tuple in a Future.'''
@@ -93,7 +93,7 @@ class DockerSpawner():
             # on the container-host IP address
             port = container_config.container_port
             port_bindings = {
-                container_config.container_port: (container_config.container_ip,)
+                port: (container_config.container_ip,)
             }
 
         app_log.debug(container_config)
@@ -102,14 +102,16 @@ class DockerSpawner():
         #
         #  ipython notebook --no-browser --port {port} --ip=0.0.0.0
         #    --NotebookApp.base_path=/{base_path}
-        #    --NotebookApp.tornado_settings=\"{ \"template_path\": [ \"/srv/ga\",
+        #    --NotebookApp.tornado_settings=\"{
+        #    \"template_path\": [ \"/srv/ga\",
         #    \"/srv/ipython/IPython/html\",
         #    \"/srv/ipython/IPython/html/templates\" ] }\""
         #
         # Important piece here is the parametrized base_path to let the
         # underlying process know where the proxy is routing it.
-        rendered_command = container_config.command.format(base_path=base_path, port=port,
-            ip=container_config.container_ip)
+        rendered_command = \
+            container_config.command.format(base_path=base_path, port=port,
+                                            ip=container_config.container_ip)
 
         command = [
             "/bin/sh",
@@ -117,9 +119,9 @@ class DockerSpawner():
             rendered_command
         ]
 
-        #volume_bindings = {}
-        #volumes = []
-        #if container_config.host_directories:
+        # volume_bindings = {}
+        # volumes = []
+        # if container_config.host_directories:
         #    directories = container_config.host_directories.split(",")
         #    for index, item in enumerate(directories):
         #        directory = item.split(":")[0]
@@ -146,14 +148,15 @@ class DockerSpawner():
             extra_hosts=extra_hosts
         )
 
-        host_config = yield self.docker_client.create_host_config(**host_config)
-        
+        host_config = \
+            yield self.docker_client.create_host_config(**host_config)
+
         cpu_shares = None
 
         if container_config.cpu_shares:
-            # Some versions of Docker and docker-py won't cast from string to int
+            # Some versions of Docker and docker-py won't cast from string to
+            # int
             cpu_shares = int(container_config.cpu_shares)
-
 
         resp = yield self._with_retries(self.docker_client.create_container,
                                         image=container_config.image,
@@ -178,9 +181,10 @@ class DockerSpawner():
             host_port = port
             host_ip = container_config.container_ip
         else:
-            container_network = yield self._with_retries(self.docker_client.port,
-                                                         container_id,
-                                                         container_config.container_port)
+            container_network = \
+                yield self._with_retries(self.docker_client.port,
+                                         container_id,
+                                         container_config.container_port)
 
             host_port = container_network[0]['HostPort']
             host_ip = container_network[0]['HostIp']
@@ -193,7 +197,8 @@ class DockerSpawner():
 
         if alive:
             yield self._with_retries(self.docker_client.stop, container_id)
-        yield self._with_retries(self.docker_client.remove_container, container_id)
+        yield self._with_retries(self.docker_client.remove_container,
+                                 container_id)
 
     @gen.coroutine
     def list_notebook_servers(self, pool_regex, all=True):
@@ -207,8 +212,8 @@ class DockerSpawner():
             try:
                 names = container['Names']
                 if names is None:
-                  app_log.warn("Docker API returned null Names, ignoring")
-                  return False
+                    app_log.warn("Docker API returned null Names, ignoring")
+                    return False
             except Exception:
                 app_log.warn("Invalid container: %r", container)
                 return False
@@ -217,15 +222,16 @@ class DockerSpawner():
                     return True
             return False
 
-        matching = [container for container in existing if name_matches(container)]
+        matching = [
+            container for container in existing if name_matches(container)]
         raise gen.Return(matching)
 
     @gen.coroutine
     def _with_retries(self, fn, *args, **kwargs):
         '''Attempt a Docker API call.
 
-        If an error occurs, retry up to "max_tries" times before letting the exception propagate
-        up the stack.'''
+        If an error occurs, retry up to "max_tries" times before letting the
+        exception propagate up the stack.  '''
 
         max_tries = kwargs.get('max_tries', RETRIES)
         try:
@@ -233,8 +239,11 @@ class DockerSpawner():
                 del kwargs['max_tries']
             result = yield fn(*args, **kwargs)
             raise gen.Return(result)
-        except (docker.errors.APIError, requests.exceptions.RequestException) as e:
-            app_log.error("Encountered a Docker error with {} ({} retries remain): {}".format(fn.__name__, max_tries, e))
+        except (docker.errors.APIError,
+                requests.exceptions.RequestException) as e:
+            app_log.error("Encountered a Docker error with"
+                          "{} ({} retries remain): {}".format(
+                              fn.__name__, max_tries, e))
             if max_tries > 0:
                 kwargs['max_tries'] = max_tries - 1
                 result = yield self._with_retries(fn, *args, **kwargs)
