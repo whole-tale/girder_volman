@@ -479,7 +479,7 @@ if __name__ == "__main__":
     # TODO: read from env / config file
     container_config = dockworker.ContainerConfig(
         command=command_default,
-        image="tmpnb-notebook",
+        image="xarthisius/singleanonuser",
         mem_limit="1024m",
         cpu_shares=None,
         container_ip='172.17.0.1',
