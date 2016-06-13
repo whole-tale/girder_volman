@@ -25,6 +25,7 @@ GIRDER_API_URL = os.environ.get(
     "GIRDER_API_URL", "https://girder.hub.yt/api/v1")
 DOCKER_URL = os.environ.get("DOCKER_URL", "unix://var/run/docker.sock")
 HOSTDIR = os.environ.get("HOSTDIR", "/host")
+MAX_FILE_SIZE = os.environ.get("MAX_FILE_SIZE", 200)
 
 MOUNTS = {}
 
@@ -123,12 +124,12 @@ def bind_items(gc, folder_id, dest):
     items_to_download = []
     for item in items:
         sizeMB = item.get("size", 0) // 1024**2
-        if sizeMB > 100:
+        if sizeMB > MAX_FILE_SIZE:
             item_path = _get_phys_path(item)
             if item_path is None:
                 msg = (
-                    "[=] Item '{}' size '{}' > 100MB. Aborting!"
-                ).format(item["name"], sizeMB)
+                    "[=] Item '{}' size '{}' > {}MB. Aborting!"
+                ).format(item["name"], sizeMB, MAX_FILE_SIZE)
                 logging.info(msg)
             else:
                 mounted_items.append(_bind_mount(item_path, dest))
@@ -139,8 +140,8 @@ def bind_items(gc, folder_id, dest):
 
 def download_items(gc, items, dest):
     for item in items:
-        logging.info("[=] downloading %s", item["name"])
-        gc.downloadItem(item["_id"], HOSTDIR + dest)
+        logging.info("[=] downloading %s to %s", item["name"], dest)
+        gc.downloadItem(item["_id"], dest)
         logging.info("[=] finished downloading %s", item["name"])
 
 
