@@ -196,7 +196,7 @@ class DockerSpawner():
         '''Gracefully stop a running container.'''
 
         if alive:
-            yield self._with_retries(self.docker_client.stop, container_id)
+            yield self._with_retries(self.docker_client.kill, container_id)
         yield self._with_retries(self.docker_client.remove_container,
                                  container_id)
 

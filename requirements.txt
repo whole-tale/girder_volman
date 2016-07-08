@@ -3,3 +3,6 @@ docker-py
 girder-client
 tornado>=4.1
 requests
+fusepy
+pycurl
+git+https://github.com/data-exp-lab/girder_fs@master#egg=girderfs

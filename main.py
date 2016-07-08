@@ -217,7 +217,7 @@ class MainHandler(tornado.web.RequestHandler):
 
         params = {'parentType': 'user', 'parentId': user["_id"],
                   'name': 'Private'}
-        homeDir = gc.listResource("/folder", params)[0]["_id"]
+        homeDir = list(gc.listResource("/folder", params))[0]["_id"]
 
         items = [item["_id"] for item in gc.listItem(homeDir)
                  if item["name"].endswith("pynb")]
@@ -234,49 +234,14 @@ class MainHandler(tornado.web.RequestHandler):
         dest = os.path.join(volume["Mountpoint"], "data")
         _safe_mkdir(HOSTDIR + dest)
 
+        # FUSE is silly and needs to have mirror inside container
+        if not os.path.isdir(dest):
+            os.makedirs(dest)
+        cmd = "girderfs -c direct --api-url {} --token {} {} {}".format(
+            GIRDER_API_URL, gc.token, dest, folder_id)
+        logging.info("Calling: %s", cmd)
+        subprocess.call(cmd, shell=True)
         db_entry["mount_point"] = volume["Mountpoint"]
-
-        params = {'parentType': 'folder', 'parentId': folder_id,
-                  'limit': 200}
-        folders = gc.listResource("/folder", params)
-        for folder in folders:
-            sizeGB = folder.get("size", 0) // 1024**3
-            metadata = folder.get("meta", None)
-            if metadata is not None:
-                logging.info("Metadata for folder", metadata)
-                source = metadata.get("phys_path", None)
-            else:
-                source = None
-
-            if source is not None:
-                db_entry['mounts'].append(_bind_mount(source, dest))
-            else:
-                # TODO
-                # this doesn't work, as girder doesn't report size properly
-                if sizeGB > 1:
-                    logging.info("[*] folder is too big to download: %i GB",
-                                 sizeGB)
-                    continue
-
-                logging.info("[=] downloading recursively %s", folder_id)
-                # start girder download, since it may take some time we are
-                # using background task to download data from girder, there's
-                # high chance it'll be finished before user actually needs
-                # anything
-                tornado.ioloop.IOLoop.current().spawn_callback(
-                    gc.downloadFolderRecursive, folder["_id"],
-                    os.path.join(HOSTDIR + dest, folder["name"])
-                )
-                logging.info("[=] finished downloading %s", folder_id)
-
-        mounted_items, items_to_download = \
-            yield bind_items(gc, folder_id, dest)
-        db_entry['mounts'] += mounted_items
-
-        # asynchronously download remaining items
-        tornado.ioloop.IOLoop.current().spawn_callback(download_items,
-                                                       gc, items_to_download,
-                                                       HOSTDIR + dest)
 
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
@@ -421,22 +386,22 @@ class MainHandler(tornado.web.RequestHandler):
                 self.spawner.shutdown_notebook_server(container.id),
                 self._proxy_remove(container.path)
             ]
-            logging.debug("Container [%s] has been released.", container)
+            logging.info("Container [%s] has been released.", container)
         except Exception as e:
             logging.error("Unable to release container [%s]: %s", container, e)
             raise tornado.web.HTTPError(
                 500, "Unable to remove container, contact admin")
 
         vol_name = "%s_%s" % (folder_id, user["login"])
-        for mount_point in db_entry['mounts']:
-            logging.info("Unmounting %s", mount_point)
-            subprocess.call(["umount", mount_point])
+        dest = os.path.join(db_entry["mount_point"], "data")
+        logging.info("Unmounting %s", dest)
+        subprocess.call("umount %s" % dest, shell=True)
 
         # upload notebooks
         user_id = gc.get("/user/me")["_id"]
         params = {'parentType': 'user', 'parentId': user_id,
                   'name': 'Private'}
-        homeDir = gc.listResource("/folder", params)[0]["_id"]
+        homeDir = list(gc.listResource("/folder", params))[0]["_id"]
         gc.blacklist.append("data")
         try:
             gc.upload('{}/*.ipynb'.format(HOSTDIR + db_entry["mount_point"]),
