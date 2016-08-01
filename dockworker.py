@@ -1,4 +1,6 @@
+# -*- coding: utf-8 -*-
 # Copyright (c) 2015, Project Jupyter
+# Copyright (c) 2016, Data Exploration Lab
 # Distributed under the terms of the Modified BSD License.
 
 from concurrent.futures import ThreadPoolExecutor

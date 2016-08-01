@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2016, Data Exploration Lab
+# Distributed under the terms of the Modified BSD License.
+
 from collections import namedtuple
 import errno
 import json
