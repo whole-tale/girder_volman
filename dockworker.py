@@ -1,3 +1,6 @@
+# Copyright (c) 2015, Project Jupyter
+# Distributed under the terms of the Modified BSD License.
+
 from concurrent.futures import ThreadPoolExecutor
 from collections import namedtuple
 
