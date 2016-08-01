@@ -201,32 +201,6 @@ class DockerSpawner():
                                  container_id)
 
     @gen.coroutine
-    def list_notebook_servers(self, pool_regex, all=True):
-        '''List containers that are managed by a specific pool.'''
-
-        existing = yield self._with_retries(self.docker_client.containers,
-                                            all=all,
-                                            trunc=False)
-
-        def name_matches(container):
-            try:
-                names = container['Names']
-                if names is None:
-                    app_log.warn("Docker API returned null Names, ignoring")
-                    return False
-            except Exception:
-                app_log.warn("Invalid container: %r", container)
-                return False
-            for name in names:
-                if pool_regex.search(name):
-                    return True
-            return False
-
-        matching = [
-            container for container in existing if name_matches(container)]
-        raise gen.Return(matching)
-
-    @gen.coroutine
     def _with_retries(self, fn, *args, **kwargs):
         '''Attempt a Docker API call.
 
@@ -250,9 +224,3 @@ class DockerSpawner():
                 raise gen.Return(result)
             else:
                 raise e
-
-    @gen.coroutine
-    def copy_files(self, container_id, path):
-        '''Returns a tarball of path from container_id'''
-        tarball = yield self.docker_client.copy(container_id, path)
-        raise gen.Return(tarball)
