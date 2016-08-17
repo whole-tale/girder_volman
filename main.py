@@ -150,6 +150,18 @@ def download_items(gc, items, dest):
 
 
 @gen.coroutine
+def _get_api_key(gc):
+    api_key = None
+    for key in gc.get('/api_key'):
+        if key['name'] == 'tmpnb' and key['active']:
+            api_key = key['key']
+
+    if api_key is None:
+        api_key = gc.post('/api_key', 
+                          data={'name': 'tmpnb', 'active': True})['key']
+    return api_key
+
+@gen.coroutine
 def parse_request_body(body):
     girder_token = body['girder_token']
     folder_id = body['collection_id']
@@ -241,8 +253,9 @@ class MainHandler(tornado.web.RequestHandler):
         # FUSE is silly and needs to have mirror inside container
         if not os.path.isdir(dest):
             os.makedirs(dest)
-        cmd = "girderfs -c direct --api-url {} --token {} {} {}".format(
-            GIRDER_API_URL, gc.token, dest, folder_id)
+        api_key = yield _get_api_key(gc)
+        cmd = "girderfs -c direct --api-url {} --api-key {} {} {}".format(
+            GIRDER_API_URL, api_key, dest, folder_id)
         logging.info("Calling: %s", cmd)
         subprocess.call(cmd, shell=True)
         db_entry["mount_point"] = volume["Mountpoint"]
