@@ -4,6 +4,7 @@
 
 from collections import namedtuple
 import errno
+import datetime
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ import subprocess
 
 import docker
 import girder_client
-import tinydb
+from dateutil.parser import parse as parse_date
 import tornado.ioloop
 import tornado.web
 from tornado import gen
@@ -99,6 +100,41 @@ def _bind_mount(source, dest):
 
 
 @gen.coroutine
+def cull_idle(proxy_url, proxy_token, timeout):
+    cull_limit = datetime.datetime.utcnow() \
+        - datetime.timedelta(seconds=timeout)
+
+    http_client = AsyncHTTPClient()
+    logging.debug("Polling proxy for idle containers")
+    req = HTTPRequest(proxy_url + '/api/users',
+                      headers={"Authorization": "token %s" % proxy_token})
+    try:
+        resp = yield http_client.fetch(req)
+    except HTTPError as e:
+        logging.error("Failed to poll proxy for idle containers: %s", e)
+
+    users = json.loads(resp.body.decode('utf8', 'replace'))
+    futures = []
+    for user in users:
+        last_activity = parse_date(user['last_activity'])
+        if user['server'] and last_activity < cull_limit:
+            logging.info(
+                "Culling %s (inactive since %s)", user['name'], last_activity)
+            # req = HTTPRequest(url=url+'/api/users/%s/server' % user['name'],
+            #                  method='DELETE',
+            #                  headers=auth_header,
+            #                  )
+            futures.append((user['name'], http_client.fetch(req)))
+        elif user['server'] and last_activity > cull_limit:
+            logging.debug("Not culling %s (active since %s)",
+                          user['name'], last_activity)
+
+    for (name, f) in futures:
+        yield f
+        logging.debug("Finished culling %s", name)
+
+
+@gen.coroutine
 def bind_items(gc, folder_id, dest):
     '''Download all items from a girder folder
 
@@ -157,19 +193,15 @@ def _get_api_key(gc):
             api_key = key['key']
 
     if api_key is None:
-        api_key = gc.post('/api_key', 
+        api_key = gc.post('/api_key',
                           data={'name': 'tmpnb', 'active': True})['key']
     return api_key
 
-@gen.coroutine
-def parse_request_body(body):
-    girder_token = body['girder_token']
-    folder_id = body['collection_id']
 
+@gen.coroutine
+def parse_request_body(data):
     gc = girder_client.GirderClient(apiUrl=GIRDER_API_URL)
-    logging.debug("got token: %s, folder_id: %s" %
-                  (girder_token, folder_id))
-    gc.token = girder_token
+    gc.token = data['girder_token']
     user = gc.get("/user/me")
     if user is None:
         logging.warn("Bad gider token")
@@ -178,20 +210,16 @@ def parse_request_body(body):
         )
 
     # Allow sysop to delete any notebook
-    userId = body.get('userId', user['_id'])
+    userId = data.get('userId', user['_id'])
     if userId != user['_id'] and user["admin"]:
         user = gc.get("/user/{id}".format(id=userId))
         logging.info("Overriding user %s", user["login"])
 
     logging.debug("USER = %s", json.dumps(user))
-    return gc, folder_id, user
+    return gc, user
 
 
 class MainHandler(tornado.web.RequestHandler):
-
-    @property
-    def db(self):
-        return self.settings['mount_db']
 
     @property
     def proxy_token(self):
@@ -219,13 +247,10 @@ class MainHandler(tornado.web.RequestHandler):
 
     @gen.coroutine
     def post(self):
-        body = json.loads(self.request.body.decode("utf-8"))
-        gc, folder_id, user = yield parse_request_body(body)
+        payload = json.loads(self.request.body.decode("utf-8"))
+        gc, user = yield parse_request_body(payload)
 
-        db_entry = {'mounts': [], 'folder_id': folder_id,
-                    'username': user["login"]}
-
-        vol_name = "%s_%s" % (folder_id, user["login"])
+        vol_name = "%s_%s" % (payload['folderId'], user['login'])
         cli = docker.Client(base_url=DOCKER_URL)
         volume = cli.create_volume(name=vol_name, driver='local')
         logging.info("Volume: %s created", vol_name)
@@ -255,18 +280,17 @@ class MainHandler(tornado.web.RequestHandler):
             os.makedirs(dest)
         api_key = yield _get_api_key(gc)
         cmd = "girderfs -c direct --api-url {} --api-key {} {} {}".format(
-            GIRDER_API_URL, api_key, dest, folder_id)
+            GIRDER_API_URL, api_key, dest, payload['folderId'])
         logging.info("Calling: %s", cmd)
         subprocess.call(cmd, shell=True)
-        db_entry["mount_point"] = volume["Mountpoint"]
 
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
         container = yield self._launch_container(volume)
-        db_entry['container_id'] = container.id
-        db_entry['container_path'] = container.path
-        self.db.insert(db_entry)
-        self.write({'url': '/{}'.format(container.path)})
+
+        self.write(dict(mountPoint=volume['Mountpoint'],
+                        containerId=container.id,
+                        containerPath=container.path))
         self.finish()
 
     @gen.coroutine
@@ -382,21 +406,17 @@ class MainHandler(tornado.web.RequestHandler):
 
     @gen.coroutine
     def delete(self):
-        body = json.loads(self.request.body.decode("utf-8"))
-        gc, folder_id, user = yield parse_request_body(body)
-
-        query = tinydb.Query()
-        data = self.db.search((query.username == user["login"]) &
-                              (query.folder_id == folder_id))
+        payload = json.loads(self.request.body.decode('utf-8'))
 
         try:
-            db_entry = data[0]
-        except IndexError:
+            container = PooledContainer(id=payload["containerId"],
+                                        path=payload["containerPath"])
+        except KeyError:
             raise tornado.web.HTTPError(
-                410, 'Container does not exist in the database')
+                500, 'Got incomplete request from Girder')
 
-        container = PooledContainer(id=db_entry["container_id"],
-                                    path=db_entry["container_path"])
+        gc, user = yield parse_request_body(payload)
+
         try:
             logging.info("Releasing container [%s].", container)
             yield [
@@ -409,8 +429,8 @@ class MainHandler(tornado.web.RequestHandler):
             raise tornado.web.HTTPError(
                 500, "Unable to remove container, contact admin")
 
-        vol_name = "%s_%s" % (folder_id, user["login"])
-        dest = os.path.join(db_entry["mount_point"], "data")
+        vol_name = "%s_%s" % (payload['folderId'], user['login'])
+        dest = os.path.join(payload['mountPoint'], 'data')
         logging.info("Unmounting %s", dest)
         subprocess.call("umount %s" % dest, shell=True)
 
@@ -421,7 +441,7 @@ class MainHandler(tornado.web.RequestHandler):
         homeDir = list(gc.listResource("/folder", params))[0]["_id"]
         gc.blacklist.append("data")
         try:
-            gc.upload('{}/*.ipynb'.format(HOSTDIR + db_entry["mount_point"]),
+            gc.upload('{}/*.ipynb'.format(HOSTDIR + payload["mountPoint"]),
                       homeDir, reuse_existing=True)
         except girder_client.HttpError:
             logging.warn("Something went wrong with data upload"
@@ -436,9 +456,6 @@ class MainHandler(tornado.web.RequestHandler):
             logging.error("Unable to remove volume [%s]: %s", vol_name, e)
             pass
 
-        self.db.remove((query.username == user["login"]) &
-                       (query.folder_id == folder_id))
-
     def get(self):
         self.write("Hello, world\n")
 
@@ -449,7 +466,6 @@ if __name__ == "__main__":
     ]
 
     docker_host = os.environ.get('DOCKER_HOST', 'unix://var/run/docker.sock')
-    mount_db = tinydb.TinyDB(os.environ.get('MOUNT_DB', 'mounts.json'))
 
     command_default = (
         'jupyter notebook --no-browser'
@@ -483,7 +499,6 @@ if __name__ == "__main__":
         spawner=spawner,
         container_name_pattern=re.compile('tmp\.([^.]+)\.(.+)\Z'),
         pool_name="tmpnb",
-        mount_db=mount_db,
         container_config=container_config,
         proxy_token=os.environ.get('CONFIGPROXY_AUTH_TOKEN', "devtoken"),
         proxy_endpoint=os.environ.get(
