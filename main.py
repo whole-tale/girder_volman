@@ -456,8 +456,30 @@ class MainHandler(tornado.web.RequestHandler):
             logging.error("Unable to remove volume [%s]: %s", vol_name, e)
             pass
 
+    @gen.coroutine
     def get(self):
-        self.write("Hello, world\n")
+        http_client = AsyncHTTPClient()
+        logging.debug('Polling proxy for idle containers')
+        req = HTTPRequest(self.proxy_endpoint + '/api/routes',
+                          headers={'Authorization': 'token %s' % self.proxy_token})
+        try:
+            resp = yield http_client.fetch(req)
+        except HTTPError as e:
+            logging.error("Failed to poll proxy for idle containers: %s", e)
+            raise tornado.web.HTTPError(
+                400, 'Failed to connect to proxy'
+            )
+
+        proxy_entries = json.loads(resp.body.decode('utf8', 'replace'))
+        result = {}
+        for entry in proxy_entries.values():
+            try:
+                result[entry['container_id']] = entry['last_activity']
+            except KeyError:
+                pass
+        self.write(json.dumps(result))
+        self.finish()
+
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
