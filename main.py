@@ -3,8 +3,8 @@
 # Distributed under the terms of the Modified BSD License.
 
 from collections import namedtuple
-import errno
 import datetime
+import errno
 import json
 import logging
 import os
@@ -13,10 +13,11 @@ import re
 import socket
 import string
 import subprocess
+import sys
 
+from dateutil.parser import parse as parse_date
 import docker
 import girder_client
-from dateutil.parser import parse as parse_date
 import tornado.ioloop
 import tornado.web
 from tornado import gen
@@ -255,32 +256,17 @@ class MainHandler(tornado.web.RequestHandler):
         volume = cli.create_volume(name=vol_name, driver='local')
         logging.info("Volume: %s created", vol_name)
         logging.info("Mountpoint: %s", volume['Mountpoint'])
+        folder_id = payload['folderId']
 
-        params = {'parentType': 'user', 'parentId': user["_id"],
-                  'name': 'Private'}
-        homeDir = list(gc.listResource("/folder", params))[0]["_id"]
-
-        items = [item["_id"] for item in gc.listItem(homeDir)
-                 if item["name"].endswith("pynb")]
-        # TODO: should be done in one go with /resource endpoint
-        #  but client doesn't have it yet
-        for item in items:
-            gc.downloadItem(item, HOSTDIR + volume["Mountpoint"])
-
-        # TODO: read uid/gid from env/config
-        for item in os.listdir(HOSTDIR + volume["Mountpoint"]):
-            os.chown(os.path.join(HOSTDIR + volume["Mountpoint"], item),
-                     1000, 100)
-
-        dest = os.path.join(volume["Mountpoint"], "data")
+        # create mounts
+        dest = os.path.join(volume["Mountpoint"], "mounts")
         _safe_mkdir(HOSTDIR + dest)
-
         # FUSE is silly and needs to have mirror inside container
         if not os.path.isdir(dest):
             os.makedirs(dest)
+
         api_key = yield _get_api_key(gc)
-        cmd = "girderfs -c direct --api-url {} --api-key {} {} {}".format(
-            GIRDER_API_URL, api_key, dest, payload['folderId'])
+        cmd = "/srv/mount_helper.py {} {} {}".format(api_key, folder_id, dest)
         logging.info("Calling: %s", cmd)
         subprocess.call(cmd, shell=True)
 
@@ -430,7 +416,7 @@ class MainHandler(tornado.web.RequestHandler):
                 500, "Unable to remove container, contact admin")
 
         vol_name = "%s_%s" % (payload['folderId'], user['login'])
-        dest = os.path.join(payload['mountPoint'], 'data')
+        dest = os.path.join(payload['mountPoint'], 'mounts')
         logging.info("Unmounting %s", dest)
         subprocess.call("umount %s" % dest, shell=True)
 
@@ -439,7 +425,7 @@ class MainHandler(tornado.web.RequestHandler):
         params = {'parentType': 'user', 'parentId': user_id,
                   'name': 'Private'}
         homeDir = list(gc.listResource("/folder", params))[0]["_id"]
-        gc.blacklist.append("data")
+        gc.blacklist.append("mounts")
         try:
             gc.upload('{}/*.ipynb'.format(HOSTDIR + payload["mountPoint"]),
                       homeDir, reuse_existing=True)
@@ -460,8 +446,9 @@ class MainHandler(tornado.web.RequestHandler):
     def get(self):
         http_client = AsyncHTTPClient()
         logging.debug('Polling proxy for idle containers')
-        req = HTTPRequest(self.proxy_endpoint + '/api/routes',
-                          headers={'Authorization': 'token %s' % self.proxy_token})
+        req = HTTPRequest(
+            self.proxy_endpoint + '/api/routes',
+            headers={'Authorization': 'token %s' % self.proxy_token})
         try:
             resp = yield http_client.fetch(req)
         except HTTPError as e:
@@ -483,6 +470,15 @@ class MainHandler(tornado.web.RequestHandler):
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
+
+    # python modules must exist in host env
+    source = sys.exec_prefix
+    dest = HOSTDIR + os.path.dirname(source)
+    subprocess.check_call(['rsync', '-avuq', source, dest])
+
+    # /tmp needs to be the same filesystem
+    os.environ["TMPDIR"] = HOSTDIR + '/tmp'
+
     handlers = [
         (r"/", MainHandler),
     ]
