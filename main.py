@@ -165,7 +165,7 @@ class MainHandler(tornado.web.RequestHandler):
         logging.info("Mountpoint: %s", volume['Mountpoint'])
 
         params = {'parentType': 'user', 'parentId': user["_id"],
-                  'name': 'Private'}
+                  'name': 'Notebooks'}
         homeDir = list(gc.listResource("/folder", params))[0]["_id"]
 
         items = [item["_id"] for item in gc.listItem(homeDir)
