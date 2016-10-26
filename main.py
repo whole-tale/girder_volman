@@ -34,7 +34,7 @@ MAX_FILE_SIZE = os.environ.get("MAX_FILE_SIZE", 200)
 
 MOUNTS = {}
 
-PooledContainer = namedtuple('PooledContainer', ['id', 'path'])
+PooledContainer = namedtuple('PooledContainer', ['id', 'path', 'host'])
 
 
 def sample_with_replacement(a, size):
@@ -198,7 +198,8 @@ class MainHandler(tornado.web.RequestHandler):
 
         self.write(dict(mountPoint=volume['Mountpoint'],
                         containerId=container.id,
-                        containerPath=container.path))
+                        containerPath=container.path,
+                        host=container.host))
         self.finish()
 
     @gen.coroutine
@@ -248,7 +249,7 @@ class MainHandler(tornado.web.RequestHandler):
         except HTTPError as e:
             logging.error("Failed to create proxy route to [%s]: %s", path, e)
 
-        container = PooledContainer(id=container_id, path=path)
+        container = PooledContainer(id=container_id, path=path, host=host_ip)
         raise gen.Return(container)
 
     @gen.coroutine
@@ -318,7 +319,8 @@ class MainHandler(tornado.web.RequestHandler):
 
         try:
             container = PooledContainer(id=payload["containerId"],
-                                        path=payload["containerPath"])
+                                        path=payload["containerPath"],
+                                        host=payload["host"])
         except KeyError:
             raise tornado.web.HTTPError(
                 500, 'Got incomplete request from Girder')
