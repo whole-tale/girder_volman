@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import socket
 import string
 import subprocess
@@ -405,6 +406,9 @@ if __name__ == "__main__":
         ' --NotebookApp.base_url=/{base_path}'
         ' --NotebookApp.port_retries=0'
     )
+
+    shutil.rmtree('/tmp', ignore_errors=True)
+    os.symlink(HOSTDIR + '/tmp', '/tmp')
 
     # TODO: read from env / config file
     container_config = dockworker.ContainerConfig(
