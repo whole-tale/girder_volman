@@ -61,6 +61,19 @@ def _safe_mkdir(dest):
 
 
 @gen.coroutine
+def get_home_dir(gc):
+    nb_store = {'parentType': 'user', 'parentId': gc.get("/user/me")["_id"],
+                'name': 'Private'}
+    homeDir = list(gc.listResource("/folder", nb_store))
+    if homeDir:
+        return homeDir[0]
+    else:
+        return gc.createFolder(
+            nb_store['parentId'], nb_store['name'],
+            parentType=nb_store['parentType'], public=False)
+
+
+@gen.coroutine
 def cull_idle(proxy_url, proxy_token, timeout):
     cull_limit = datetime.datetime.utcnow() \
         - datetime.timedelta(seconds=timeout)
@@ -168,13 +181,9 @@ class MainHandler(tornado.web.RequestHandler):
         logging.info("Volume: %s created", vol_name)
         logging.info("Mountpoint: %s", volume['Mountpoint'])
 
-        params = {'parentType': 'user', 'parentId': user["_id"],
-                  'name': 'Private'}
-        homeDir = list(gc.listResource("/folder", params))[0]["_id"]
-
-        items = [item["_id"] for item in gc.listItem(homeDir)
-                 if item["name"].endswith("pynb")]
-
+        homeDir = yield get_home_dir(gc)
+        items = [item['_id'] for item in gc.listItem(homeDir['_id'])
+                 if item['name'].endswith('pynb')]
         # gc.downloadItem() uses NamedTemporaryFile() which in turn uses
         # os.rename() to move a file from tmpdir to the destination path.
         # Since we are moving files to mount binded host filesystem it raises
@@ -361,14 +370,12 @@ class MainHandler(tornado.web.RequestHandler):
         subprocess.call("umount %s" % dest, shell=True)
 
         # upload notebooks
-        user_id = gc.get("/user/me")["_id"]
-        params = {'parentType': 'user', 'parentId': user_id,
-                  'name': 'Private'}
-        homeDir = list(gc.listResource("/folder", params))[0]["_id"]
-        gc.blacklist.append("data")
+        homeDir = yield get_home_dir(gc)
+        if hasattr(gc, 'blacklist'):
+            gc.blacklist.append("data")
         try:
             gc.upload('{}/*.ipynb'.format(HOSTDIR + payload["mountPoint"]),
-                      homeDir, reuse_existing=True)
+                      homeDir['_id'], reuse_existing=True)
         except girder_client.HttpError:
             logging.warn("Something went wrong with data upload"
                          ", should backup data")
