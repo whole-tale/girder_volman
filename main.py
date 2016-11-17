@@ -2,7 +2,12 @@
 # Copyright (c) 2016, Data Exploration Lab
 # Distributed under the terms of the Modified BSD License.
 
+import base64
 from collections import namedtuple
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import InvalidSignature
 import errno
 import datetime
 import json
@@ -58,6 +63,34 @@ def _safe_mkdir(dest):
             raise
         logging.warn("Failed to mkdir {}".format(dest))
         pass
+
+
+def verify_message(gc, payload):
+    hub_data = gc.get('/ythub')
+    hub_public_key = serialization.load_pem_public_key(
+        hub_data['pubkey'].encode('utf8'),
+        backend=default_backend()
+    )
+
+    signature = payload.pop('signature', None)
+    if signature is None:
+        return False
+
+    verifier = hub_public_key.verifier(
+        base64.b64decode(signature.encode('utf8')),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+
+    verifier.update(json.dumps(payload).encode('utf8'))
+    try:
+        verifier.verify()
+    except InvalidSignature:
+        return False
+    return True
 
 
 @gen.coroutine
@@ -127,7 +160,7 @@ def parse_request_body(data):
     gc.token = data['girder_token']
     user = gc.get("/user/me")
     if user is None:
-        logging.warn("Bad gider token")
+        logging.warn("Bad girder token")
         raise tornado.web.HTTPError(
             401, 'Failed to authenticate with girder'
         )
