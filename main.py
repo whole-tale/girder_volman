@@ -14,6 +14,7 @@ import shutil
 import socket
 import string
 import subprocess
+import tempfile
 
 import docker
 import girder_client
@@ -162,6 +163,8 @@ class MainHandler(tornado.web.RequestHandler):
         vol_name = "%s_%s" % (payload['folderId'], user['login'])
         cli = docker.Client(base_url=DOCKER_URL)
         volume = cli.create_volume(name=vol_name, driver='local')
+        # TODO: any error raised beyond this point should be caught and
+        # volume should be gracefully removed
         logging.info("Volume: %s created", vol_name)
         logging.info("Mountpoint: %s", volume['Mountpoint'])
 
@@ -171,10 +174,22 @@ class MainHandler(tornado.web.RequestHandler):
 
         items = [item["_id"] for item in gc.listItem(homeDir)
                  if item["name"].endswith("pynb")]
-        # TODO: should be done in one go with /resource endpoint
-        #  but client doesn't have it yet
+
+        # gc.downloadItem() uses NamedTemporaryFile() which in turn uses
+        # os.rename() to move a file from tmpdir to the destination path.
+        # Since we are moving files to mount binded host filesystem it raises
+        # OSError: [Errno 18] Invalid cross-device link.
+        # As a precaution we download notebooks directly to tmpdir and
+        # subsequently move it to Mountpoint using shutil.move()
+        notebooks_dir = tempfile.mkdtemp()
         for item in items:
-            gc.downloadItem(item, HOSTDIR + volume["Mountpoint"])
+            # TODO: should be done in one go with /resource endpoint
+            #  but client doesn't have it yet
+            gc.downloadItem(item, notebooks_dir)
+        for notebook in os.listdir(notebooks_dir):
+            shutil.move(os.path.join(notebooks_dir, notebook),
+                        HOSTDIR + volume["Mountpoint"])
+        os.rmdir(notebooks_dir)
 
         # TODO: read uid/gid from env/config
         for item in os.listdir(HOSTDIR + volume["Mountpoint"]):
@@ -406,9 +421,6 @@ if __name__ == "__main__":
         ' --NotebookApp.base_url=/{base_path}'
         ' --NotebookApp.port_retries=0'
     )
-
-    shutil.rmtree('/tmp', ignore_errors=True)
-    os.symlink(HOSTDIR + '/tmp', '/tmp')
 
     # TODO: read from env / config file
     container_config = dockworker.ContainerConfig(
