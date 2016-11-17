@@ -63,7 +63,7 @@ def _safe_mkdir(dest):
 @gen.coroutine
 def get_home_dir(gc):
     nb_store = {'parentType': 'user', 'parentId': gc.get("/user/me")["_id"],
-                'name': 'Private'}
+                'name': 'Notebooks'}
     homeDir = list(gc.listResource("/folder", nb_store))
     if homeDir:
         return homeDir[0]
