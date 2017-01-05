@@ -164,15 +164,7 @@ class MainHandler(tornado.web.RequestHandler):
         logging.info("Volume: %s created", vol_name)
         logging.info("Mountpoint: %s", volume['Mountpoint'])
 
-        params = {'parentType': 'user', 'parentId': user["_id"],
-                  'name': 'Notebooks'}
-        try:
-            homeDir = list(gc.listResource("/folder", params))[0]
-        except IndexError:  # no such folder
-            params['description'] = 'Folder for storing notebooks.'
-            params['public'] = False
-            homeDir = gc.createResource('folder', params)
-
+        homeDir = gc.loadOrCreateFolder('Notebooks', user['_id'], 'user')
         items = [item["_id"] for item in gc.listItem(homeDir['_id'])
                  if item["name"].endswith("pynb")]
         # TODO: should be done in one go with /resource endpoint
@@ -348,14 +340,7 @@ class MainHandler(tornado.web.RequestHandler):
         subprocess.call("umount %s" % dest, shell=True)
 
         # upload notebooks
-        user_id = gc.get("/user/me")["_id"]
-        params = {'parentType': 'user', 'parentId': user_id,
-                  'name': 'Notebooks'}
-        try:
-            homeDir = list(gc.listResource("/folder", params))[0]
-        except IndexError:  # that's weird but whatevs
-            pass
-
+        homeDir = gc.loadOrCreateFolder('Notebooks', user['_id'], 'user')
         try:
             gc.upload('{}/*.ipynb'.format(HOSTDIR + payload["mountPoint"]),
                       homeDir['_id'], reuseExisting=True, blacklist=["data"])
