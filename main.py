@@ -166,9 +166,14 @@ class MainHandler(tornado.web.RequestHandler):
 
         params = {'parentType': 'user', 'parentId': user["_id"],
                   'name': 'Notebooks'}
-        homeDir = list(gc.listResource("/folder", params))[0]["_id"]
+        try:
+            homeDir = list(gc.listResource("/folder", params))[0]
+        except IndexError:  # no such folder
+            params['description'] = 'Folder for storing notebooks.'
+            params['public'] = False
+            homeDir = gc.createResource('folder', params)
 
-        items = [item["_id"] for item in gc.listItem(homeDir)
+        items = [item["_id"] for item in gc.listItem(homeDir['_id'])
                  if item["name"].endswith("pynb")]
         # TODO: should be done in one go with /resource endpoint
         #  but client doesn't have it yet
@@ -345,14 +350,18 @@ class MainHandler(tornado.web.RequestHandler):
         # upload notebooks
         user_id = gc.get("/user/me")["_id"]
         params = {'parentType': 'user', 'parentId': user_id,
-                  'name': 'Private'}
-        homeDir = list(gc.listResource("/folder", params))[0]["_id"]
+                  'name': 'Notebooks'}
+        try:
+            homeDir = list(gc.listResource("/folder", params))[0]
+        except IndexError:  # that's weird but whatevs
+            pass
+
         try:
             gc.upload('{}/*.ipynb'.format(HOSTDIR + payload["mountPoint"]),
-                      homeDir, reuse_existing=True, blacklist=["data"])
-        except girder_client.HttpError:
-            logging.warn("Something went wrong with data upload"
-                         ", should backup data")
+                      homeDir['_id'], reuseExisting=True, blacklist=["data"])
+        except girder_client.HttpError as err:
+            logging.warn("Something went wrong with data upload: %s" %
+                         err.responseText)
             pass  # upload failed, keep going
 
         cli = docker.Client(base_url=DOCKER_URL)
@@ -399,6 +408,7 @@ if __name__ == "__main__":
     command_default = (
         'jupyter notebook --no-browser'
         ' --port {port} --ip=0.0.0.0'
+        ' --NotebookApp.token=""'
         ' --NotebookApp.base_url=/{base_path}'
         ' --NotebookApp.port_retries=0'
     )
