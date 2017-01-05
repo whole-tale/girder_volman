@@ -347,10 +347,9 @@ class MainHandler(tornado.web.RequestHandler):
         params = {'parentType': 'user', 'parentId': user_id,
                   'name': 'Private'}
         homeDir = list(gc.listResource("/folder", params))[0]["_id"]
-        gc.blacklist.append("data")
         try:
             gc.upload('{}/*.ipynb'.format(HOSTDIR + payload["mountPoint"]),
-                      homeDir, reuse_existing=True)
+                      homeDir, reuse_existing=True, blacklist=["data"])
         except girder_client.HttpError:
             logging.warn("Something went wrong with data upload"
                          ", should backup data")
