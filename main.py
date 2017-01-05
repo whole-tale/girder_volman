@@ -403,14 +403,20 @@ if __name__ == "__main__":
         ' --NotebookApp.base_url=/{base_path}'
         ' --NotebookApp.port_retries=0'
     )
+    container_image = os.environ.get(
+        'DOCKER_IMAGE', 'xarthisius/singleanonuser')
+    container_memlimit = os.environ.get(
+        'DOCKER_MEMLIMIT', '2048m')
+    container_ip = os.environ.get(
+        'DOCKER_GATEWAY', '172.17.0.1')
 
     # TODO: read from env / config file
     container_config = dockworker.ContainerConfig(
         command=command_default,
-        image="xarthisius/singleanonuser",
-        mem_limit="1024m",
+        image=container_image,
+        mem_limit=container_memlimit,
         cpu_shares=None,
-        container_ip='172.17.0.1',
+        container_ip=container_ip,
         container_port='8888',
         container_user='jovyan',
         host_network=False,
