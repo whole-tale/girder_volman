@@ -79,6 +79,10 @@ class DockerSpawner():
         self.port = 0
 
     @gen.coroutine
+    def pull_image(self, container_config):
+        yield self.docker_client.pull(container_config.image)
+
+    @gen.coroutine
     def create_notebook_server(self, base_path, container_name,
                                container_config, volume_bindings):
         '''Creates a notebook_server running off of `base_path`.
