@@ -5,6 +5,7 @@
 from collections import namedtuple
 import errno
 import datetime
+from distutils.version import StrictVersion
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ import dockworker
 
 AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
 
+API_VERSION = '1.1'
 GIRDER_API_URL = os.environ.get(
     "GIRDER_API_URL", "https://girder.hub.yt/api/v1")
 DOCKER_URL = os.environ.get("DOCKER_URL", "unix://var/run/docker.sock")
@@ -34,7 +36,7 @@ MAX_FILE_SIZE = os.environ.get("MAX_FILE_SIZE", 200)
 
 MOUNTS = {}
 
-PooledContainer = namedtuple('PooledContainer', ['id', 'path'])
+PooledContainer = namedtuple('PooledContainer', ['id', 'path', 'host'])
 
 
 def sample_with_replacement(a, size):
@@ -124,7 +126,12 @@ def parse_request_body(data):
         logging.info("Overriding user %s", user["login"])
 
     logging.debug("USER = %s", json.dumps(user))
-    return gc, user
+
+    frontendId = data.get('frontendId')
+    frontend = None
+    if frontendId is not None:
+        frontend = gc.get('/frontend/%s' % frontendId)
+    return gc, user, frontend
 
 
 class MainHandler(tornado.web.RequestHandler):
@@ -156,7 +163,12 @@ class MainHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def post(self):
         payload = json.loads(self.request.body.decode("utf-8"))
-        gc, user = yield parse_request_body(payload)
+        api_check = payload.get('api_version', '1.0')
+        if StrictVersion(api_check) != StrictVersion(API_VERSION):
+            raise tornado.web.HTTPError(
+                500, 'Unsupported API (%s) (server API %s)'
+                % (api_check, API_VERSION))
+        gc, user, frontend = yield parse_request_body(payload)
 
         vol_name = "%s_%s" % (payload['folderId'], user['login'])
         cli = docker.Client(base_url=DOCKER_URL)
@@ -174,6 +186,8 @@ class MainHandler(tornado.web.RequestHandler):
 
         # TODO: read uid/gid from env/config
         for item in os.listdir(HOSTDIR + volume["Mountpoint"]):
+            if item == 'data':
+                continue
             os.chown(os.path.join(HOSTDIR + volume["Mountpoint"], item),
                      1000, 100)
 
@@ -189,17 +203,47 @@ class MainHandler(tornado.web.RequestHandler):
         logging.info("Calling: %s", cmd)
         subprocess.call(cmd, shell=True)
 
+        container_config = yield self.get_container_config(frontend)
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
-        container = yield self._launch_container(volume)
+        container = yield self._launch_container(
+            volume, container_config=container_config)
 
         self.write(dict(mountPoint=volume['Mountpoint'],
                         containerId=container.id,
-                        containerPath=container.path))
+                        containerPath=container.path,
+                        host=container.host))
         self.finish()
 
     @gen.coroutine
-    def _launch_container(self, volume):
+    def get_container_config(self, frontend):
+        if frontend is None:
+            container_config = self.settings['container_config']
+        else:
+            defaults = self.settings['container_config']
+            command = frontend.get('command') or defaults.command
+            image = frontend['imageName']
+            mem_limit = frontend.get('memLimit') or defaults.mem_limit
+            port = frontend.get('port') or defaults.container_port
+            user = frontend.get('user') or defaults.container_user
+            cpu_shares = frontend.get('cpuShares') or defaults.cpu_shares
+
+            container_config = dockworker.ContainerConfig(
+                command=command,
+                image=image,
+                mem_limit=mem_limit,
+                cpu_shares=cpu_shares,
+                container_ip=defaults.container_ip,
+                container_port=port,
+                container_user=user,
+                host_network=False,
+                host_directories=None,
+                extra_hosts=[]
+            )
+        raise gen.Return(container_config)
+
+    @gen.coroutine
+    def _launch_container(self, volume, container_config=None):
         user = new_user(12)
         path = "user/" + user
         container_name = 'tmp.{}.{}'.format(self.pool_name, user)
@@ -212,9 +256,11 @@ class MainHandler(tornado.web.RequestHandler):
 
         logging.info("Launching new notebook server [%s] at path [%s].",
                      container_name, path)
+        if container_config is None:
+            container_config = self.container_config
         create_result = yield self.spawner.create_notebook_server(
             base_path=path, container_name=container_name,
-            container_config=self.container_config,
+            container_config=container_config,
             volume_bindings=volume_bindings
         )
         container_id, host_ip, host_port = create_result
@@ -245,7 +291,7 @@ class MainHandler(tornado.web.RequestHandler):
         except HTTPError as e:
             logging.error("Failed to create proxy route to [%s]: %s", path, e)
 
-        container = PooledContainer(id=container_id, path=path)
+        container = PooledContainer(id=container_id, path=path, host=host_ip)
         raise gen.Return(container)
 
     @gen.coroutine
@@ -315,12 +361,13 @@ class MainHandler(tornado.web.RequestHandler):
 
         try:
             container = PooledContainer(id=payload["containerId"],
-                                        path=payload["containerPath"])
+                                        path=payload["containerPath"],
+                                        host=payload['host'])
         except KeyError:
             raise tornado.web.HTTPError(
                 500, 'Got incomplete request from Girder')
 
-        gc, user = yield parse_request_body(payload)
+        gc, user, _ = yield parse_request_body(payload)
 
         try:
             logging.info("Releasing container [%s].", container)
