@@ -84,7 +84,8 @@ class DockerSpawner():
 
     @gen.coroutine
     def create_notebook_server(self, base_path, container_name,
-                               container_config, volume_bindings):
+                               container_config, volume_bindings,
+                               security_token):
         '''Creates a notebook_server running off of `base_path`.
 
         Returns the (container_id, ip, port) tuple in a Future.'''
@@ -120,7 +121,8 @@ class DockerSpawner():
         # underlying process know where the proxy is routing it.
         rendered_command = \
             container_config.command.format(base_path=base_path, port=port,
-                                            ip=container_config.container_ip)
+                                            ip=container_config.container_ip,
+                                            token=security_token)
 
         command = [
             "/bin/sh",

@@ -14,6 +14,7 @@ import re
 import socket
 import string
 import subprocess
+import uuid
 
 import docker
 import girder_client
@@ -258,10 +259,12 @@ class MainHandler(tornado.web.RequestHandler):
                      container_name, path)
         if container_config is None:
             container_config = self.container_config
+        nb_token = uuid.uuid4().hex
         create_result = yield self.spawner.create_notebook_server(
             base_path=path, container_name=container_name,
             container_config=container_config,
-            volume_bindings=volume_bindings
+            volume_bindings=volume_bindings,
+            security_token=nb_token,
         )
         container_id, host_ip, host_port = create_result
         logging.info(
@@ -291,7 +294,9 @@ class MainHandler(tornado.web.RequestHandler):
         except HTTPError as e:
             logging.error("Failed to create proxy route to [%s]: %s", path, e)
 
-        container = PooledContainer(id=container_id, path=path, host=host_ip)
+        container = PooledContainer(
+            id=container_id, path='%s/login?token=%s' % (path, nb_token),
+            host=host_ip)
         raise gen.Return(container)
 
     @gen.coroutine
