@@ -4,7 +4,6 @@
 
 from collections import namedtuple
 import errno
-import datetime
 from distutils.version import StrictVersion
 import json
 import logging
@@ -18,7 +17,6 @@ import uuid
 
 import docker
 import girder_client
-from dateutil.parser import parse as parse_date
 import tornado.ioloop
 import tornado.web
 from tornado import gen
@@ -59,41 +57,6 @@ def _safe_mkdir(dest):
             raise
         logging.warn("Failed to mkdir {}".format(dest))
         pass
-
-
-@gen.coroutine
-def cull_idle(proxy_url, proxy_token, timeout):
-    cull_limit = datetime.datetime.utcnow() \
-        - datetime.timedelta(seconds=timeout)
-
-    http_client = AsyncHTTPClient()
-    logging.debug("Polling proxy for idle containers")
-    req = HTTPRequest(proxy_url + '/api/users',
-                      headers={"Authorization": "token %s" % proxy_token})
-    try:
-        resp = yield http_client.fetch(req)
-    except HTTPError as e:
-        logging.error("Failed to poll proxy for idle containers: %s", e)
-
-    users = json.loads(resp.body.decode('utf8', 'replace'))
-    futures = []
-    for user in users:
-        last_activity = parse_date(user['last_activity'])
-        if user['server'] and last_activity < cull_limit:
-            logging.info(
-                "Culling %s (inactive since %s)", user['name'], last_activity)
-            # req = HTTPRequest(url=url+'/api/users/%s/server' % user['name'],
-            #                  method='DELETE',
-            #                  headers=auth_header,
-            #                  )
-            futures.append((user['name'], http_client.fetch(req)))
-        elif user['server'] and last_activity > cull_limit:
-            logging.debug("Not culling %s (active since %s)",
-                          user['name'], last_activity)
-
-    for (name, f) in futures:
-        yield f
-        logging.debug("Finished culling %s", name)
 
 
 @gen.coroutine
