@@ -30,7 +30,7 @@ AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
 
 API_VERSION = '1.1'
 GIRDER_API_URL = os.environ.get(
-    "GIRDER_API_URL", "https://girder.hub.yt/api/v1")
+    "GIRDER_API_URL", "https://girder.wholetale.org/api/v1")
 DOCKER_URL = os.environ.get("DOCKER_URL", "unix://var/run/docker.sock")
 HOSTDIR = os.environ.get("HOSTDIR", "/host")
 MAX_FILE_SIZE = os.environ.get("MAX_FILE_SIZE", 200)
