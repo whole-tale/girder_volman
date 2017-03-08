@@ -26,7 +26,7 @@ import dockworker
 
 AsyncHTTPClient.configure("tornado.curl_httpclient.CurlAsyncHTTPClient")
 
-API_VERSION = '1.1'
+API_VERSION = '2.0'
 GIRDER_API_URL = os.environ.get(
     "GIRDER_API_URL", "https://girder.wholetale.org/api/v1")
 DOCKER_URL = os.environ.get("DOCKER_URL", "unix://var/run/docker.sock")
@@ -82,20 +82,14 @@ def parse_request_body(data):
         raise tornado.web.HTTPError(
             401, 'Failed to authenticate with girder'
         )
-
-    # Allow sysop to delete any notebook
-    userId = data.get('userId', user['_id'])
-    if userId != user['_id'] and user["admin"]:
-        user = gc.get("/user/{id}".format(id=userId))
-        logging.info("Overriding user %s", user["login"])
-
-    logging.debug("USER = %s", json.dumps(user))
-
-    frontendId = data.get('frontendId')
-    frontend = None
-    if frontendId is not None:
-        frontend = gc.get('/frontend/%s' % frontendId)
-    return gc, user, frontend
+    if data.get('taleId'):
+        obj = gc.get('/tale/%s' % data['taleId'])
+    elif data.get('instanceId'):
+        obj = gc.get('/instance/%s' % data['instanceId'])
+    else:
+        obj = None
+    # TODO: catch possible errors
+    return gc, user, obj
 
 
 class MainHandler(tornado.web.RequestHandler):
@@ -132,9 +126,10 @@ class MainHandler(tornado.web.RequestHandler):
             raise tornado.web.HTTPError(
                 500, 'Unsupported API (%s) (server API %s)'
                 % (api_check, API_VERSION))
-        gc, user, frontend = yield parse_request_body(payload)
+        gc, user, tale = yield parse_request_body(payload)
 
-        vol_name = "%s_%s" % (payload['folderId'], user['login'])
+        vol_name = "%s_%s" % (tale['_id'], user['login'])
+
         cli = docker.Client(base_url=DOCKER_URL)
         volume = cli.create_volume(name=vol_name, driver='local')
         logging.info("Volume: %s created", vol_name)
@@ -157,49 +152,44 @@ class MainHandler(tornado.web.RequestHandler):
 
         dest = os.path.join(volume["Mountpoint"], "data")
         _safe_mkdir(HOSTDIR + dest)
-
         # FUSE is silly and needs to have mirror inside container
         if not os.path.isdir(dest):
             os.makedirs(dest)
         api_key = yield _get_api_key(gc)
         cmd = "girderfs -c direct --api-url {} --api-key {} {} {}".format(
-            GIRDER_API_URL, api_key, dest, payload['folderId'])
+            GIRDER_API_URL, api_key, dest, tale['folderId'])
         logging.info("Calling: %s", cmd)
         subprocess.call(cmd, shell=True)
 
-        container_config = yield self.get_container_config(frontend)
+        container_config = yield self.get_container_config(gc, tale)  # FIXME
         # CREATE CONTAINER
         # REGISTER CONTAINER WITH PROXY
         container = yield self._launch_container(
             volume, container_config=container_config)
 
         self.write(dict(mountPoint=volume['Mountpoint'],
+                        volumeName=vol_name,
                         containerId=container.id,
                         containerPath=container.path,
                         host=container.host))
         self.finish()
 
     @gen.coroutine
-    def get_container_config(self, frontend):
-        if frontend is None:
+    def get_container_config(self, gc, tale):
+        if tale is None:
             container_config = self.settings['container_config']
         else:
-            defaults = self.settings['container_config']
-            command = frontend.get('command') or defaults.command
-            image = frontend['imageName']
-            mem_limit = frontend.get('memLimit') or defaults.mem_limit
-            port = frontend.get('port') or defaults.container_port
-            user = frontend.get('user') or defaults.container_user
-            cpu_shares = frontend.get('cpuShares') or defaults.cpu_shares
-
+            image = gc.get('/image/%s' % tale['imageId'])
+            tale_config = image['config']
+            tale_config.update(tale['config'])
             container_config = dockworker.ContainerConfig(
-                command=command,
-                image=image,
-                mem_limit=mem_limit,
-                cpu_shares=cpu_shares,
-                container_ip=defaults.container_ip,
-                container_port=port,
-                container_user=user,
+                command=tale_config.get('command'),
+                image=image['fullName'],
+                mem_limit=tale_config.get('memLimit'),
+                cpu_shares=tale_config.get('cpuShares'),
+                container_ip=os.environ.get('DOCKER_GATEWAY', '172.17.0.1'),
+                container_port=tale_config.get('port'),
+                container_user=tale_config.get('user'),
                 host_network=False,
                 host_directories=None,
                 extra_hosts=[]
@@ -223,7 +213,7 @@ class MainHandler(tornado.web.RequestHandler):
         if container_config is None:
             container_config = self.container_config
         nb_token = uuid.uuid4().hex
-        create_result = yield self.spawner.create_notebook_server(
+        create_result = yield self.spawner.create_instance(
             base_path=path, container_name=container_name,
             container_config=container_config,
             volume_bindings=volume_bindings,
@@ -326,21 +316,21 @@ class MainHandler(tornado.web.RequestHandler):
     @gen.coroutine
     def delete(self):
         payload = json.loads(self.request.body.decode('utf-8'))
+        gc, user, instance = yield parse_request_body(payload)
 
+        containerInfo = instance['containerInfo']
         try:
-            container = PooledContainer(id=payload["containerId"],
-                                        path=payload["containerPath"],
-                                        host=payload['host'])
+            container = PooledContainer(id=containerInfo['containerId'],
+                                        path=containerInfo['containerPath'],
+                                        host=containerInfo['host'])
         except KeyError:
             raise tornado.web.HTTPError(
                 500, 'Got incomplete request from Girder')
 
-        gc, user, _ = yield parse_request_body(payload)
-
         try:
             logging.info("Releasing container [%s].", container)
             yield [
-                self.spawner.shutdown_notebook_server(container.id),
+                self.spawner.shutdown_instane(container.id),
                 self._proxy_remove(container.path)
             ]
             logging.info("Container [%s] has been released.", container)
@@ -349,15 +339,14 @@ class MainHandler(tornado.web.RequestHandler):
             raise tornado.web.HTTPError(
                 500, "Unable to remove container, contact admin")
 
-        vol_name = "%s_%s" % (payload['folderId'], user['login'])
-        dest = os.path.join(payload['mountPoint'], 'data')
+        dest = os.path.join(containerInfo['mountPoint'], 'data')
         logging.info("Unmounting %s", dest)
         subprocess.call("umount %s" % dest, shell=True)
 
         # upload notebooks
         homeDir = gc.loadOrCreateFolder('Notebooks', user['_id'], 'user')
         try:
-            gc.upload('{}/*.ipynb'.format(HOSTDIR + payload["mountPoint"]),
+            gc.upload(HOSTDIR + containerInfo["mountPoint"] + '/*.ipynb',
                       homeDir['_id'], reuseExisting=True, blacklist=["data"])
         except girder_client.HttpError as err:
             logging.warn("Something went wrong with data upload: %s" %
@@ -366,10 +355,11 @@ class MainHandler(tornado.web.RequestHandler):
 
         cli = docker.Client(base_url=DOCKER_URL)
         try:
-            logging.info("Removing volume: %s", vol_name)
-            cli.remove_volume(vol_name)
+            logging.info("Removing volume: %s", containerInfo['volumeName'])
+            cli.remove_volume(containerInfo['volumeName'])
         except Exception as e:
-            logging.error("Unable to remove volume [%s]: %s", vol_name, e)
+            logging.error("Unable to remove volume [%s]: %s",
+                          containerInfo['volumeName'], e)
             pass
 
     @gen.coroutine

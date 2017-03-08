@@ -83,9 +83,9 @@ class DockerSpawner():
         yield self.docker_client.pull(container_config.image)
 
     @gen.coroutine
-    def create_notebook_server(self, base_path, container_name,
-                               container_config, volume_bindings,
-                               security_token):
+    def create_instance(self, base_path, container_name,
+                        container_config, volume_bindings,
+                        security_token):
         '''Creates a notebook_server running off of `base_path`.
 
         Returns the (container_id, ip, port) tuple in a Future.'''
@@ -203,7 +203,7 @@ class DockerSpawner():
         raise gen.Return((container_id, host_ip, int(host_port)))
 
     @gen.coroutine
-    def shutdown_notebook_server(self, container_id, alive=True):
+    def shutdown_instance(self, container_id, alive=True):
         '''Gracefully stop a running container.'''
 
         if alive:

@@ -1,6 +1,6 @@
 tinydb
 docker-py
-girder-client
+girder-client>=2.0.0
 tornado>=4.1
 requests
 fusepy
