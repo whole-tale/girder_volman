@@ -156,7 +156,7 @@ class MainHandler(tornado.web.RequestHandler):
         if not os.path.isdir(dest):
             os.makedirs(dest)
         api_key = yield _get_api_key(gc)
-        cmd = "girderfs -c direct --api-url {} --api-key {} {} {}".format(
+        cmd = "girderfs -c remote --api-url {} --api-key {} {} {}".format(
             GIRDER_API_URL, api_key, dest, tale['folderId'])
         logging.info("Calling: %s", cmd)
         subprocess.call(cmd, shell=True)
