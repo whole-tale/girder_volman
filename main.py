@@ -330,7 +330,7 @@ class MainHandler(tornado.web.RequestHandler):
         try:
             logging.info("Releasing container [%s].", container)
             yield [
-                self.spawner.shutdown_instane(container.id),
+                self.spawner.shutdown_instance(container.id),
                 self._proxy_remove(container.path)
             ]
             logging.info("Container [%s] has been released.", container)
