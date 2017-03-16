@@ -320,9 +320,10 @@ class MainHandler(tornado.web.RequestHandler):
 
         containerInfo = instance['containerInfo']
         try:
-            container = PooledContainer(id=containerInfo['containerId'],
-                                        path=containerInfo['containerPath'],
-                                        host=containerInfo['host'])
+            container = PooledContainer(
+                id=containerInfo['containerId'],
+                path=containerInfo['containerPath'].split('/login')[0],
+                host=containerInfo['host'])
         except KeyError:
             raise tornado.web.HTTPError(
                 500, 'Got incomplete request from Girder')
