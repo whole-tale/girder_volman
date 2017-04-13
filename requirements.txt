@@ -5,4 +5,4 @@ tornado>=4.1
 requests
 fusepy
 pycurl
-git+https://github.com/data-exp-lab/girder_fs@master#egg=girderfs
+git+https://github.com/whole-tale/girderfs@master#egg=girderfs
