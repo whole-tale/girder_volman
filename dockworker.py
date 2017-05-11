@@ -146,7 +146,7 @@ class DockerSpawner():
         #            'bind': '/mnt/vol' + str(index),
         #            'mode': permissions
         #        }
-        volumes = ["/home/jovyan/work"]
+        volumes = ["/home/{}/work".format(container_config.container_user)]
 
         extra_hosts = dict(map(lambda h: tuple(h.split(':')),
                                container_config.extra_hosts))
