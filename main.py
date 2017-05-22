@@ -128,7 +128,7 @@ class MainHandler(tornado.web.RequestHandler):
                 % (api_check, API_VERSION))
         gc, user, tale = yield parse_request_body(payload)
 
-        vol_name = "%s_%s" % (tale['_id'], user['login'])
+        vol_name = "%s_%s_%s" % (tale['_id'], user['login'], new_user(6))
 
         cli = docker.Client(base_url=DOCKER_URL)
         volume = cli.create_volume(name=vol_name, driver='local')
